@@ -46,6 +46,7 @@ function getCommonConfig(env) {
 }
 
 module.exports = [
+    // 1. Popup (unchanged)
     function popup(env) {
         return merge(getCommonConfig(env), {
             entry: { popup: './popup/index.js' },
@@ -58,6 +59,7 @@ module.exports = [
             ],
         });
     },
+    // 2. Content scripts (unchanged)
     function content(env) {
         return merge(getCommonConfig(env), {
             entry: {
@@ -72,27 +74,38 @@ module.exports = [
             ],
         });
     },
-    function backgroundPage(env) {
+    // 3. Service Worker (replaces old backgroundPage)
+    function serviceWorker(env) {
         return merge(getCommonConfig(env), {
-            entry: { background: './background-page/index.js' },
-            output: { path: path.join(outputPath, 'background-page') },
+            entry: { index: './service-worker/index.js' },
+            output: { path: path.join(outputPath, 'service-worker') },
             plugins: [
                 new CopyPlugin({
                     patterns: [
                         { from: 'manifest.json', to: '../manifest.json' },
                         { from: './assets/**/*', to: '..' },
-                        {
-                            from: './_locales/**/*',
-                            to: '..',
-                        },
+                        { from: './_locales/**/*', to: '..' },
+                    ],
+                }),
+            ],
+        });
+    },
+    // 4. Offscreen Document (new for MV3)
+    function offscreen(env) {
+        return merge(getCommonConfig(env), {
+            entry: { offscreen: './offscreen/offscreen.js' },
+            output: { path: path.join(outputPath, 'offscreen') },
+            plugins: [
+                new HtmlWebpackPlugin({
+                    template: './offscreen/offscreen.html',
+                }),
+                new CopyPlugin({
+                    patterns: [
                         {
                             from: './background-page/encoders/*',
                             to: './encoders/[name][ext]',
                         },
                     ],
-                }),
-                new HtmlWebpackPlugin({
-                    template: './background-page/index.html',
                 }),
             ],
         });

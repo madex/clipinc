@@ -7,12 +7,13 @@ chrome.runtime.onStartup.addListener(() => {
     closeOffscreenDocument();
 });
 
-// handle tab / window removed
+// Listeners are registered at top level and all recording state lives in
+// chrome.storage: the service worker is terminated after ~30s without events,
+// which happens during every song, and globals would be lost.
 chrome.tabs.onRemoved.addListener(handleTabRemove);
 chrome.windows.onRemoved.addListener(handleWindowRemove);
-
-let recordingTabId = null;
-let updateListenerActive = false;
+chrome.tabs.onUpdated.addListener(handleTabUpdated);
+chrome.downloads.onChanged.addListener(cleanDownloadShelf);
 
 // ---- Offscreen Document Lifecycle ----
 
@@ -77,7 +78,12 @@ chrome.runtime.onMessage.addListener(
     ({ command, data }, sender, sendResponse) => {
         // Ignore messages intended for the offscreen document (sent by us)
         // But handle offscreen:downloadComplete (from offscreen → SW) and offscreen:ready
-        if (command.startsWith('offscreen:') && command !== 'offscreen:downloadComplete' && command !== 'offscreen:ready') {
+        if (
+            command.startsWith('offscreen:') &&
+            command !== 'offscreen:downloadComplete' &&
+            command !== 'offscreen:recordingFailed' &&
+            command !== 'offscreen:ready'
+        ) {
             return false;
         }
 
@@ -91,7 +97,7 @@ chrome.runtime.onMessage.addListener(
                     (err) => {
                         console.error('startCapture failed:', err);
                         sendResponse({ success: false });
-                    }
+                    },
                 );
                 return true;
 
@@ -116,8 +122,13 @@ chrome.runtime.onMessage.addListener(
                     sendToOffscreen('offscreen:spotifyAbort');
                     break;
                 }
-                console.debug('SW: sending offscreen:spotifyEnded with track', endedTrack?.title);
-                sendToOffscreen('offscreen:spotifyEnded', { track: endedTrack });
+                console.debug(
+                    'SW: sending offscreen:spotifyEnded with track',
+                    endedTrack?.title,
+                );
+                sendToOffscreen('offscreen:spotifyEnded', {
+                    track: endedTrack,
+                });
                 break;
             }
 
@@ -126,9 +137,11 @@ chrome.runtime.onMessage.addListener(
                 break;
 
             case 'spotifyPause':
-                // Ignore pause - the audio capture stream records continuously.
-                // We only react to track changes (spotifyEnded/spotifyPlay).
-                console.debug('SW: spotifyPause received - ignoring (continuous recording)');
+                sendToOffscreen('offscreen:spotifyPause');
+                break;
+
+            case 'spotifyResume':
+                sendToOffscreen('offscreen:spotifyResume');
                 break;
 
             case 'stopCapture':
@@ -142,13 +155,24 @@ chrome.runtime.onMessage.addListener(
 
             // From offscreen: recording complete, download the MP3
             case 'offscreen:downloadComplete':
-                console.debug('SW: recording complete for', data.track?.title, 'filename:', data.filename);
+                console.debug(
+                    'SW: recording complete for',
+                    data.track?.title,
+                    'filename:',
+                    data.filename,
+                );
                 handleDownloadComplete(data.track, data.filename, data.dataUrl);
+                closeOffscreenWhenIdle(data.pendingEncodings);
+                break;
+
+            case 'offscreen:recordingFailed':
+                handleRecordingFailed(data.message);
+                closeOffscreenWhenIdle(data.pendingEncodings);
                 break;
         }
 
         return false;
-    }
+    },
 );
 
 // Helper to send messages to the offscreen document
@@ -174,8 +198,17 @@ async function startCapture() {
             command: 'prepareRecording',
         });
     } catch (err) {
-        console.debug('Content script not reachable, injecting...', err.message);
-        // Inject content script programmatically
+        console.debug(
+            'Content script not reachable, injecting...',
+            err.message,
+        );
+        // Inject content scripts programmatically. The media element already
+        // exists, inject.js hooks it on the next play() call of the start sequence
+        await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            files: ['content/inject.js'],
+            world: 'MAIN',
+        });
         await chrome.scripting.executeScript({
             target: { tabId: tab.id },
             files: ['content/content.js'],
@@ -205,7 +238,7 @@ async function startCapture() {
                 message: chrome.i18n.getMessage('errorChangeDevice'),
                 iconUrl: '/assets/images/clipinc-128.png',
             },
-            console.debug.bind(console)
+            console.debug.bind(console),
         );
         throw new Error(response.error);
     }
@@ -233,44 +266,46 @@ async function startCapture() {
         throw new Error('Offscreen capture failed');
     }
 
-    // Set up tab update listener for navigation detection
-    recordingTabId = tab.id;
-    if (!updateListenerActive) {
-        chrome.tabs.onUpdated.addListener(updateListener);
-        updateListenerActive = true;
-    }
-
-    // Tell content script to start playback
-    chrome.tabs.sendMessage(tab.id, { command: 'startRecording' });
-
-    chrome.storage.local.set({
+    await chrome.storage.local.set({
         isRecording: true,
         tabId: tab.id,
         songCount: 0,
         volume: response.volume,
     });
     setRecordingIcon();
+
+    // Tell content script to start playback
+    chrome.tabs.sendMessage(tab.id, { command: 'startRecording' });
 }
 
-function stopRecording() {
-    chrome.runtime.sendMessage({ command: 'offscreen:stopCapture' });
-
-    if (updateListenerActive) {
-        chrome.tabs.onUpdated.removeListener(updateListener);
-        updateListenerActive = false;
+async function stopRecording() {
+    // the unfinished track is discarded, tracks that are still being encoded
+    // are downloaded and the offscreen document is closed afterwards
+    let pendingEncodings = 0;
+    try {
+        const response = await chrome.runtime.sendMessage({
+            command: 'offscreen:stopCapture',
+        });
+        pendingEncodings = (response && response.pendingEncodings) || 0;
+    } catch (e) {
+        console.debug('stopRecording: offscreen document not reachable', e);
     }
 
-    chrome.storage.local.get(['tabId', 'volume'], ({ tabId, volume }) => {
-        if (tabId) {
-            chrome.tabs.sendMessage(tabId, {
+    const { tabId, volume } = await chrome.storage.local.get([
+        'tabId',
+        'volume',
+    ]);
+    if (tabId) {
+        chrome.tabs
+            .sendMessage(tabId, {
                 command: 'stopRecording',
                 data: { volume: volume || 1 },
-            });
-        }
-    });
+            })
+            .catch((e) => console.debug('stopRecording: tab not reachable', e));
+    }
 
     reset();
-    closeOffscreenDocument();
+    closeOffscreenWhenIdle(pendingEncodings);
 
     chrome.notifications.create(
         'clipincStop',
@@ -280,14 +315,37 @@ function stopRecording() {
             message: chrome.i18n.getMessage('notificationStop'),
             iconUrl: '/assets/images/clipinc-128.png',
         },
-        console.debug.bind(console)
+        console.debug.bind(console),
     );
+}
+
+async function closeOffscreenWhenIdle(pendingEncodings) {
+    if (pendingEncodings > 0) {
+        console.debug(
+            'SW: keeping offscreen document for',
+            pendingEncodings,
+            'encodings',
+        );
+        return;
+    }
+
+    const { isRecording } = await chrome.storage.local.get('isRecording');
+    if (!isRecording) {
+        closeOffscreenDocument();
+    }
 }
 
 // ---- Handlers ----
 
-function updateListener(id, changeInfo) {
-    if (recordingTabId === id && changeInfo.status === 'loading') {
+// stop recording when the recorded tab navigates or reloads
+async function handleTabUpdated(id, changeInfo) {
+    if (changeInfo.status !== 'loading') return;
+
+    const { isRecording, tabId } = await chrome.storage.local.get([
+        'isRecording',
+        'tabId',
+    ]);
+    if (isRecording && tabId === id) {
         stopRecording();
     }
 }
@@ -296,7 +354,13 @@ function handleDownloadComplete(track, filename, dataUrl) {
     // Perform the actual download in the service worker
     // (chrome.downloads is NOT available in offscreen documents)
     if (dataUrl && filename) {
-        console.debug('SW: starting download', filename, 'size ~', Math.round(dataUrl.length * 0.75 / 1024), 'KB');
+        console.debug(
+            'SW: starting download',
+            filename,
+            'size ~',
+            Math.round((dataUrl.length * 0.75) / 1024),
+            'KB',
+        );
         chrome.downloads.download(
             {
                 url: dataUrl,
@@ -305,14 +369,15 @@ function handleDownloadComplete(track, filename, dataUrl) {
             },
             (downloadId) => {
                 if (chrome.runtime.lastError) {
-                    console.error('SW: Download failed:', chrome.runtime.lastError.message);
+                    console.error(
+                        'SW: Download failed:',
+                        chrome.runtime.lastError.message,
+                    );
                 } else {
                     console.debug('SW: Download started, id:', downloadId);
                 }
-            }
+            },
         );
-
-        chrome.downloads.onChanged.addListener(cleanDownloadShelf);
     }
 
     chrome.storage.local.get(['songCount'], ({ songCount }) => {
@@ -336,7 +401,7 @@ function handleDownloadComplete(track, filename, dataUrl) {
             message,
             iconUrl: '/assets/images/clipinc-128.png',
         },
-        console.debug.bind(console)
+        console.debug.bind(console),
     );
 }
 
@@ -347,27 +412,56 @@ function cleanDownloadShelf(delta) {
     }
 
     chrome.downloads.search({ id: delta.id }, (downloads) => {
-        if (downloads[0].filename.indexOf('clipinc') === -1) {
+        const download = downloads[0];
+        if (
+            !download ||
+            download.byExtensionId !== chrome.runtime.id ||
+            download.filename.indexOf('clipinc') === -1
+        ) {
             return;
         }
 
         chrome.downloads.erase({ id: delta.id });
-        chrome.downloads.onChanged.removeListener(cleanDownloadShelf);
     });
 }
 
+function handleRecordingFailed(reason) {
+    console.error('SW: recording failed:', reason);
+
+    chrome.notifications.create(
+        'clipincFailed',
+        {
+            type: 'basic',
+            title: chrome.i18n.getMessage('name'),
+            message: chrome.i18n
+                .getMessage('notificationFailed')
+                .replace('##REASON##', reason),
+            iconUrl: '/assets/images/clipinc-128.png',
+        },
+        console.debug.bind(console),
+    );
+}
+
 // delete storage if the tab that was recorded is closed
-function handleTabRemove(id) {
-    if (recordingTabId && id === recordingTabId) {
+async function handleTabRemove(id) {
+    const { isRecording, tabId } = await chrome.storage.local.get([
+        'isRecording',
+        'tabId',
+    ]);
+    if (isRecording && tabId === id) {
         stopRecording();
     }
 }
 
 // delete storage if the window that was recording was closed
-function handleWindowRemove() {
-    if (!recordingTabId) return;
+async function handleWindowRemove() {
+    const { isRecording, tabId } = await chrome.storage.local.get([
+        'isRecording',
+        'tabId',
+    ]);
+    if (!isRecording || !tabId) return;
 
-    chrome.tabs.get(recordingTabId, (tab) => {
+    chrome.tabs.get(tabId, (tab) => {
         if (chrome.runtime.lastError || !tab) {
             stopRecording();
         }
@@ -388,30 +482,33 @@ function resetStorage() {
 // set icon to default
 // Paths must be relative to extension root (not to service worker location)
 function setDefaultIcon() {
-    chrome.action.setIcon({
-        path: {
-            16: '/assets/images/clipinc-16.png',
-            32: '/assets/images/clipinc-32.png',
-            48: '/assets/images/clipinc-48.png',
-            128: '/assets/images/clipinc-128.png',
-        },
-    }).catch((err) => console.warn('setDefaultIcon failed:', err));
+    chrome.action
+        .setIcon({
+            path: {
+                16: '/assets/images/clipinc-16.png',
+                32: '/assets/images/clipinc-32.png',
+                48: '/assets/images/clipinc-48.png',
+                128: '/assets/images/clipinc-128.png',
+            },
+        })
+        .catch((err) => console.warn('setDefaultIcon failed:', err));
 }
 
 // set icon to recording
 function setRecordingIcon() {
-    chrome.action.setIcon({
-        path: {
-            16: '/assets/images/clipinc-16-record.png',
-            32: '/assets/images/clipinc-32-record.png',
-            48: '/assets/images/clipinc-48-record.png',
-            128: '/assets/images/clipinc-128-record.png',
-        },
-    }).catch((err) => console.warn('setRecordingIcon failed:', err));
+    chrome.action
+        .setIcon({
+            path: {
+                16: '/assets/images/clipinc-16-record.png',
+                32: '/assets/images/clipinc-32-record.png',
+                48: '/assets/images/clipinc-48-record.png',
+                128: '/assets/images/clipinc-128-record.png',
+            },
+        })
+        .catch((err) => console.warn('setRecordingIcon failed:', err));
 }
 
 function reset() {
     resetStorage();
     setDefaultIcon();
-    recordingTabId = null;
 }

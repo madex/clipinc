@@ -7,7 +7,8 @@ export class Recorder {
     constructor(source) {
         this.context = source.context;
         if (this.context.createScriptProcessor == null) {
-            this.context.createScriptProcessor = this.context.createJavaScriptNode;
+            this.context.createScriptProcessor =
+                this.context.createJavaScriptNode;
         }
 
         this.input = this.context.createGain();
@@ -31,7 +32,7 @@ export class Recorder {
         this.processor = this.context.createScriptProcessor(
             OPTIONS.bufferSize,
             OPTIONS.numChannels,
-            OPTIONS.numChannels
+            OPTIONS.numChannels,
         );
         this.input.connect(this.processor);
         this.processor.connect(this.context.destination);
@@ -48,6 +49,26 @@ export class Recorder {
         });
     }
 
+    // stops feeding samples to the worker without discarding the track,
+    // used while Spotify is paused so the pause is not recorded as silence
+    pauseRecording() {
+        if (!this.isRecording() || this.paused) {
+            return;
+        }
+
+        this.input.disconnect();
+        this.paused = true;
+    }
+
+    resumeRecording() {
+        if (!this.isRecording() || !this.paused) {
+            return;
+        }
+
+        this.input.connect(this.processor);
+        this.paused = false;
+    }
+
     cancelRecording() {
         if (!this.isRecording()) {
             return;
@@ -56,6 +77,7 @@ export class Recorder {
         this.input.disconnect();
         this.processor.disconnect();
         delete this.processor;
+        this.paused = false;
         this.worker.postMessage({ command: 'cancel' });
     }
 
@@ -70,6 +92,7 @@ export class Recorder {
         this.processor.disconnect();
         this.input.disconnect();
         delete this.processor;
+        this.paused = false;
 
         // Hand off the current worker for encoding — it will fire onComplete when done
         const oldWorker = this.worker;

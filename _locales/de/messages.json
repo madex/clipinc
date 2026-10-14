@@ -13,5 +13,8 @@
     },
     "notificationStop": {
         "message": "Die Aufnahme wurde abgebrochen."
+    },
+    "notificationFailed": {
+        "message": "Ein Titel konnte nicht gespeichert werden: ##REASON##"
     }
 }

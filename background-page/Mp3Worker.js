@@ -49,20 +49,24 @@ function postProgress(progress) {
 function finish(track) {
     console.debug('finish', recBuffers);
 
-    if (recBuffers) {
-        postProgress(0);
-        encoder = new Mp3LameEncoder(sampleRate, track.kbps);
-        let timeout = Date.now() + 1000;
-        while (recBuffers.length > 0) {
-            encoder.encode(recBuffers.shift());
-            let now = Date.now();
-            if (now > timeout) {
-                postProgress((bufferCount - recBuffers.length) / bufferCount);
-                timeout = now + 1000;
-            }
-        }
-        postProgress(1);
+    if (!recBuffers || recBuffers.length === 0) {
+        cleanup();
+        error('no audio samples recorded');
+        return;
     }
+
+    postProgress(0);
+    encoder = new Mp3LameEncoder(sampleRate, track.kbps);
+    let timeout = Date.now() + 1000;
+    while (recBuffers.length > 0) {
+        encoder.encode(recBuffers.shift());
+        let now = Date.now();
+        if (now > timeout) {
+            postProgress((bufferCount - recBuffers.length) / bufferCount);
+            timeout = now + 1000;
+        }
+    }
+    postProgress(1);
 
     // save variables locally so cleanup can be run
     const blob = encoder.finish('audio/mpeg');
@@ -79,77 +83,93 @@ function finish(track) {
     if (track.cover && track.cover.length > 0) {
         imagePromise = fetch(track.cover)
             .then((res) => {
-                if (!res.ok) throw new Error(`Cover fetch returned ${res.status}`);
+                if (!res.ok)
+                    throw new Error(`Cover fetch returned ${res.status}`);
                 return res.arrayBuffer().then((arrayBuffer) => ({
                     arrayBuffer,
                     mimeType: res.headers.get('Content-Type') || 'image/jpeg',
                 }));
             })
             .catch((err) => {
-                console.warn('Mp3Worker: cover fetch failed, proceeding without cover:', err.message);
+                console.warn(
+                    'Mp3Worker: cover fetch failed, proceeding without cover:',
+                    err.message,
+                );
                 return null;
             });
     } else {
         imagePromise = Promise.resolve(null);
     }
 
-    Promise.all([filePromise, imagePromise]).then(([file, cover]) => {
-        console.debug('got file', cover ? 'and image' : '(no cover)');
+    Promise.all([filePromise, imagePromise])
+        .then(([file, cover]) => {
+            console.debug('got file', cover ? 'and image' : '(no cover)');
 
-        const writer = new ID3Writer(file);
-        writer
-            .setFrame('TPE1', [track.artist || 'Unknown'])
-            .setFrame('TIT2', track.title || 'Unknown')
-            .setFrame('TLEN', track.duration || 0);
+            const writer = new ID3Writer(file);
+            writer
+                .setFrame('TPE1', [track.artist || 'Unknown'])
+                .setFrame('TIT2', track.title || 'Unknown')
+                .setFrame('TLEN', track.duration || 0);
 
-        if (cover && cover.arrayBuffer && cover.arrayBuffer.byteLength > 0) {
-            writer.setFrame('APIC', {
-                type: 3,
-                data: cover.arrayBuffer,
-                description: '',
-                mimeType: cover.mimeType,
+            if (
+                cover &&
+                cover.arrayBuffer &&
+                cover.arrayBuffer.byteLength > 0
+            ) {
+                writer.setFrame('APIC', {
+                    type: 3,
+                    data: cover.arrayBuffer,
+                    description: '',
+                    mimeType: cover.mimeType,
+                });
+            }
+
+            if (track.album) {
+                writer.setFrame('TALB', track.album);
+            }
+
+            if (track.albumArtist) {
+                writer.setFrame('TPE2', track.albumArtist);
+            }
+
+            if (track.albumReleaseDate) {
+                writer.setFrame('TDAT', track.albumReleaseDate);
+            }
+
+            if (track.albumReleaseYear) {
+                writer.setFrame('TYER', track.albumReleaseYear);
+            }
+
+            if (track.discNumber) {
+                writer.setFrame('TPOS', track.discNumber);
+            }
+
+            if (track.trackNumber) {
+                writer.setFrame('TRCK', track.trackNumber);
+            }
+
+            writer.addTag();
+
+            console.debug('done');
+            // Send the raw ArrayBuffer instead of a blob URL.
+            // Blob URLs are context-local and cannot cross worker boundaries.
+            const taggedArrayBuffer = writer.arrayBuffer;
+            self.postMessage(
+                {
+                    command: 'complete',
+                    track,
+                    arrayBuffer: taggedArrayBuffer,
+                },
+                [taggedArrayBuffer],
+            );
+        })
+        .catch((err) => {
+            console.error('Mp3Worker: encoding/tagging failed:', err);
+            self.postMessage({
+                command: 'error',
+                message: 'Encoding failed: ' + err.message,
             });
-        }
-
-        if (track.album) {
-            writer.setFrame('TALB', track.album);
-        }
-
-        if (track.albumArtist) {
-            writer.setFrame('TPE2', track.albumArtist);
-        }
-
-        if (track.albumReleaseDate) {
-            writer.setFrame('TDAT', track.albumReleaseDate);
-        }
-
-        if (track.albumReleaseYear) {
-            writer.setFrame('TYER', track.albumReleaseYear);
-        }
-
-        if (track.discNumber) {
-            writer.setFrame('TPOS', track.discNumber);
-        }
-
-        if (track.trackNumber) {
-            writer.setFrame('TRCK', track.trackNumber);
-        }
-
-        writer.addTag();
-
-        console.debug('done');
-        // Send the raw ArrayBuffer instead of a blob URL.
-        // Blob URLs are context-local and cannot cross worker boundaries.
-        const taggedArrayBuffer = writer.arrayBuffer;
-        self.postMessage({
-            command: 'complete',
-            track,
-            arrayBuffer: taggedArrayBuffer,
-        }, [taggedArrayBuffer]);
-    }).catch((err) => {
-        console.error('Mp3Worker: encoding/tagging failed:', err);
-        self.postMessage({ command: 'error', message: 'Encoding failed: ' + err.message });
-    });
+        });
 }
 
 function cleanup() {

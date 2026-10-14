@@ -1,94 +1,192 @@
-import './inject';
-
 // Guard against double injection (manifest + programmatic)
-if (window.__clipincLoaded) {
-    console.debug('clipinc: content script already loaded, skipping re-initialization');
-    // Stop execution - functions below will be defined but never called
-    // The original instance's message listener and polling are already active
-}
 const __clipincFirstLoad = !window.__clipincLoaded;
 window.__clipincLoaded = true;
 
+// a title change this soon after a track started means Spotify updated the DOM
+// after the play event, so it is a metadata update and not a new track
+const TRACK_SETTLE_MS = 3000;
+const POLL_INTERVAL_MS = 1000;
+
 let trackTimeout;
-
-// ---- DOM Polling State ----
 let pollingInterval = null;
-let lastTrackTitle = null;
-let lastTrackInfo = null;     // cached track info for the currently recording track
-let isRecordingTrack = false;  // true while we have an active track being recorded
+let sessionActive = false; // between startRecording and stopRecording
+let trackOpen = false; // a track is being recorded (it may be paused)
+let currentTrackKey = null;
+let trackStartedAt = 0;
+let trackSeq = 0; // invalidates late track info responses of previous tracks
+let lastTrackInfo = null; // info of the track being recorded
+let playingWithoutTrack = 0; // polls that saw playback without an open track
 
-// ---- DOM Polling Functions ----
+// ---- Media events (dispatched by inject.js in the MAIN world) ----
 
-function startPolling() {
-    console.debug('clipinc: startPolling');
-    lastTrackTitle = null;
-    lastTrackInfo = null;
-    isRecordingTrack = false;
-    // Clear any existing interval
-    if (pollingInterval) {
-        clearInterval(pollingInterval);
+document.addEventListener('clipinc:play', () => {
+    if (!sessionActive) return;
+
+    const key = getTrackKey();
+    if (!trackOpen) {
+        startTrack(key);
+    } else if (
+        key &&
+        key !== currentTrackKey &&
+        Date.now() - trackStartedAt > TRACK_SETTLE_MS
+    ) {
+        // switched to another track without an ended event
+        finishTrack();
+        startTrack(key);
+    } else {
+        chrome.runtime.sendMessage({ command: 'spotifyResume', data: {} });
     }
-    pollingInterval = setInterval(pollSpotifyState, 1000);
-    // Run first check after a short delay to let the UI settle
-    setTimeout(pollSpotifyState, 500);
+});
+
+document.addEventListener('clipinc:pause', () => {
+    if (sessionActive && trackOpen) {
+        chrome.runtime.sendMessage({ command: 'spotifyPause', data: {} });
+    }
+});
+
+document.addEventListener('clipinc:ended', () => {
+    if (sessionActive && trackOpen) {
+        finishTrack();
+    }
+});
+
+// abort is dispatched when the user skips a track, the partial track is discarded
+document.addEventListener('clipinc:abort', () => {
+    if (sessionActive && trackOpen) {
+        cancelTrack();
+    }
+});
+
+// Spotify created a new media element, it has to play at full volume as well
+document.addEventListener('clipinc:initplayer', () => {
+    if (sessionActive) {
+        setVolume(1, true);
+    }
+});
+
+// ---- Track lifecycle ----
+
+function startTrack(key) {
+    const seq = ++trackSeq;
+    trackOpen = true;
+    currentTrackKey = key;
+    trackStartedAt = Date.now();
+    lastTrackInfo = getLocalTrackInfo();
+    console.debug('clipinc: start track', key);
+
+    chrome.runtime.sendMessage({
+        command: 'spotifyPlay',
+        data: { track: lastTrackInfo },
+    });
+
+    clearTimeout(trackTimeout);
+    trackTimeout = setTimeout(() => {
+        getTrackInfo().then((track) => {
+            if (seq !== trackSeq) return;
+            updateTrackInfo(track);
+        });
+    }, 1000);
 }
 
-function stopPolling() {
-    console.debug('clipinc: stopPolling');
-    if (pollingInterval) {
-        clearInterval(pollingInterval);
-        pollingInterval = null;
-    }
-    lastTrackTitle = null;
-    lastTrackInfo = null;
-    isRecordingTrack = false;
+function updateTrackInfo(track) {
+    lastTrackInfo = track;
+    chrome.runtime.sendMessage({
+        command: 'spotifyUpdateTrack',
+        data: { track },
+    });
 }
 
+// sends the info of the finished track along, so the service worker does not
+// have to read it from storage where the next spotifyPlay overwrites it
+function finishTrack() {
+    console.debug('clipinc: finish track', currentTrackKey);
+    clearTimeout(trackTimeout);
+    trackSeq++;
+    trackOpen = false;
+    chrome.runtime.sendMessage({
+        command: 'spotifyEnded',
+        data: { track: lastTrackInfo },
+    });
+}
+
+function cancelTrack() {
+    console.debug('clipinc: cancel track', currentTrackKey);
+    clearTimeout(trackTimeout);
+    trackSeq++;
+    trackOpen = false;
+    chrome.runtime.sendMessage({ command: 'spotifyAbort', data: {} });
+}
+
+// ---- Session ----
+
+function startSession() {
+    sessionActive = true;
+    trackOpen = false;
+    currentTrackKey = null;
+    playingWithoutTrack = 0;
+    setVolume(1, true);
+
+    // restart the current track so the first file is complete,
+    // the track is opened by the play event
+    pause();
+    skipBack();
+    setTimeout(play, 500);
+
+    clearInterval(pollingInterval);
+    pollingInterval = setInterval(pollSpotifyState, POLL_INTERVAL_MS);
+}
+
+function stopSession(volume) {
+    sessionActive = false;
+    trackOpen = false;
+    clearTimeout(trackTimeout);
+    trackSeq++;
+    clearInterval(pollingInterval);
+    pollingInterval = null;
+
+    releaseVolumeControl();
+    setVolume(volume !== undefined ? volume : 1, false);
+}
+
+// Fallback for track changes without media events (e.g. gapless playback
+// via MediaSource, or the media element was not hooked)
 function pollSpotifyState() {
-    const isPlaying = isSpotifyPlaying();
-    const currentTitle = getCurrentTitle();
-    const currentArtist = getCurrentArtist();
-
-    // Build a unique track key from title + artist
-    const trackKey = currentTitle && currentArtist
-        ? `${currentTitle}|||${currentArtist}`
-        : currentTitle;
-
-    // Debug: log state every 10 seconds
-    if (!pollSpotifyState._count) pollSpotifyState._count = 0;
-    pollSpotifyState._count++;
-    if (pollSpotifyState._count % 10 === 1) {
-        console.debug('clipinc: poll state - playing:', isPlaying,
-            'recording:', isRecordingTrack,
-            'title:', currentTitle, 'artist:', currentArtist);
+    if (!sessionActive || !isSpotifyPlaying()) {
+        playingWithoutTrack = 0;
+        return;
     }
 
-    // Case 1: Track change while playing (most important - triggers download of previous track)
-    if (isPlaying && trackKey && trackKey !== lastTrackTitle) {
-        if (isRecordingTrack && lastTrackTitle !== null) {
-            // Previous track ended -> trigger save/download
-            console.debug('clipinc: track changed → ending previous track');
-            handlePlayerEnded();
+    const key = getTrackKey();
+    if (!key) return;
+
+    if (!trackOpen) {
+        // a play event normally opens the track immediately,
+        // wait for a second poll before falling back
+        if (++playingWithoutTrack >= 2) {
+            console.debug('clipinc: playback without play event, start track');
+            startTrack(key);
         }
-        lastTrackTitle = trackKey;
-        isRecordingTrack = true;
-        console.debug('clipinc: new track → start recording:', currentTitle, '-', currentArtist);
-        handlePlayerPlay();
         return;
     }
+    playingWithoutTrack = 0;
 
-    // Case 2: First detection when starting (track already playing, not yet known)
-    if (isPlaying && trackKey && lastTrackTitle === null) {
-        lastTrackTitle = trackKey;
-        isRecordingTrack = true;
-        console.debug('clipinc: initial track detected:', currentTitle, '-', currentArtist);
-        handlePlayerPlay();
-        return;
+    if (key === currentTrackKey) return;
+
+    if (Date.now() - trackStartedAt < TRACK_SETTLE_MS) {
+        currentTrackKey = key;
+        updateTrackInfo(getLocalTrackInfo());
+    } else {
+        console.debug('clipinc: track change detected by polling');
+        finishTrack();
+        startTrack(key);
     }
+}
 
-    // Case 3: Ignore pause/resume flapping - the recorder records continuously.
-    // We only care about track changes, not play/pause state.
-    // The audio capture stream keeps recording regardless of Spotify's play state.
+function getTrackKey() {
+    const title = getCurrentTitle();
+    const artist = getCurrentArtist();
+    if (!title) return null;
+    return artist ? `${title}|||${artist}` : title;
 }
 
 /**
@@ -98,7 +196,9 @@ function pollSpotifyState() {
  * Confirmed working from user logs: btn aria-label: Pause / Play
  */
 function isSpotifyPlaying() {
-    const btn = document.querySelector('[data-testid="control-button-playpause"]');
+    const btn = document.querySelector(
+        '[data-testid="control-button-playpause"]',
+    );
     if (!btn) return false;
 
     const label = (btn.getAttribute('aria-label') || '').toLowerCase();
@@ -107,7 +207,12 @@ function isSpotifyPlaying() {
     // Note: "pausieren" does NOT contain "pause" (it's paus-i-e-ren), so we check for "paus"
     if (label.includes('paus')) return true;
     // "Play" or "Abspielen" (DE) or "Wiedergabe" (DE) → currently paused
-    if (label.includes('play') || label.includes('abspielen') || label.includes('wiedergabe')) return false;
+    if (
+        label.includes('play') ||
+        label.includes('abspielen') ||
+        label.includes('wiedergabe')
+    )
+        return false;
 
     // Fallback: check SVG path
     const playIconPath = btn.querySelector('path[d*="M3 1.713"]');
@@ -118,58 +223,17 @@ function isSpotifyPlaying() {
 
 function getCurrentTitle() {
     const el = document.querySelector(
-        '[data-testid="context-item-info-title"]'
+        '[data-testid="context-item-info-title"]',
     );
     return el?.textContent || null;
 }
 
 function getCurrentArtist() {
     const el = document.querySelector(
-        '[data-testid="context-item-info-subtitles"]'
+        '[data-testid="context-item-info-subtitles"]',
     );
     return el?.textContent || null;
 }
-
-// ---- Player Event Handlers ----
-
-// handle player play event
-function handlePlayerPlay() {
-    lastTrackInfo = getLocalTrackInfo();
-    chrome.runtime.sendMessage(
-        { command: 'spotifyPlay', data: { track: lastTrackInfo } }
-    );
-    trackTimeout = setTimeout(() => {
-        getTrackInfo().then((track) => {
-            lastTrackInfo = track;
-            chrome.runtime.sendMessage({
-                command: 'spotifyUpdateTrack',
-                data: { track },
-            });
-        });
-    }, 1000);
-}
-
-// handle player ended event — sends the CURRENT track info so the SW
-// doesn't need to read it from storage (avoids race condition with spotifyPlay)
-function handlePlayerEnded() {
-    clearTimeout(trackTimeout);
-    chrome.runtime.sendMessage({
-        command: 'spotifyEnded',
-        data: { track: lastTrackInfo },
-    });
-}
-
-// handle player abort event
-function handlePlayerAbort() {
-    clearTimeout(trackTimeout);
-    chrome.runtime.sendMessage({ command: 'spotifyAbort', data: {} });
-}
-
-// handle player pause event
-function handlePlayerPause() {
-    chrome.runtime.sendMessage({ command: 'spotifyPause', data: {} });
-}
-
 // handle player volume change event
 function handlePlayerVolumeInput(event) {
     chrome.runtime.sendMessage({
@@ -204,7 +268,7 @@ function getAlbumName() {
  */
 function getPlayListName() {
     const trackList = document.querySelector(
-        'div[data-testid="playlist-tracklist"]'
+        'div[data-testid="playlist-tracklist"]',
     );
     return trackList?.getAttribute('aria-label') || '';
 }
@@ -215,7 +279,7 @@ function getPlayListName() {
  */
 function isTrackInPlayList() {
     const playlist = document.querySelector(
-        'div[data-testid="playlist-tracklist"]'
+        'div[data-testid="playlist-tracklist"]',
     );
     return Boolean(playlist);
 }
@@ -234,7 +298,7 @@ const getTrackInfo = () =>
         const isPremium = document.querySelector('.AdsContainer') === null;
 
         fetch(
-            'https://open.spotify.com/get_access_token?reason=transport&productType=web_player'
+            'https://open.spotify.com/get_access_token?reason=transport&productType=web_player',
         )
             .then((data) => {
                 if (!data.ok) {
@@ -251,7 +315,9 @@ const getTrackInfo = () =>
                     })
                         .then((res) => {
                             if (!res.ok) {
-                                throw new Error(`Spotify API returned ${res.status}`);
+                                throw new Error(
+                                    `Spotify API returned ${res.status}`,
+                                );
                             }
                             return res.json();
                         })
@@ -270,7 +336,7 @@ const getTrackInfo = () =>
                                 artist: track.artists.reduce(
                                     (acc, a) =>
                                         acc + (acc ? ', ' : '') + a.name,
-                                    ''
+                                    '',
                                 ),
                                 duration: track.duration_ms,
                                 cover: track.album.images
@@ -282,11 +348,11 @@ const getTrackInfo = () =>
                                 albumArtist: track.album.artists.reduce(
                                     (acc, a) =>
                                         acc + (acc ? ', ' : '') + a.name,
-                                    ''
+                                    '',
                                 ),
                                 albumReleaseYear: parseInt(
                                     track.album.release_date.substring(0, 4),
-                                    10
+                                    10,
                                 ),
                                 isPremium,
                                 kbps: isPremium ? 256 : 128,
@@ -301,19 +367,24 @@ const getTrackInfo = () =>
                         .catch((err) => {
                             console.warn(
                                 'clipinc: could not retrieve remote track info, using local info',
-                                err
+                                err,
                             );
                             resolve(getLocalTrackInfo());
                         });
                 } else {
                     // No access token available, use local track info
-                    console.warn('clipinc: no access token, using local track info');
+                    console.warn(
+                        'clipinc: no access token, using local track info',
+                    );
                     resolve(getLocalTrackInfo());
                 }
             })
             .catch((ex) => {
                 // API not available (403, network error, etc.) - fall back to local info
-                console.warn('clipinc: access token fetch failed, using local track info', ex);
+                console.warn(
+                    'clipinc: access token fetch failed, using local track info',
+                    ex,
+                );
                 resolve(getLocalTrackInfo());
             });
     });
@@ -331,16 +402,16 @@ function getLocalTrackInfo() {
     const isPremium = document.querySelector('.AdsContainer') === null;
 
     const titleEl = document.querySelector(
-        '[data-testid="context-item-info-title"]'
+        '[data-testid="context-item-info-title"]',
     );
     const artistEl = document.querySelector(
-        '[data-testid="context-item-info-subtitles"]'
+        '[data-testid="context-item-info-subtitles"]',
     );
     const durationEl = document.querySelector(
-        '[data-testid="playback-duration"]'
+        '[data-testid="playback-duration"]',
     );
     const coverEl = document.querySelector(
-        'img[data-testid="cover-art-image"]'
+        'img[data-testid="cover-art-image"]',
     );
 
     const title = titleEl?.textContent || 'Unknown Title';
@@ -395,15 +466,17 @@ function getIsLocalDevice() {
 
 // get current volume from dom
 function getVolume() {
-    const v = JSON.parse(localStorage.getItem('playback') || '{"volume":1}').volume;
+    const v = JSON.parse(
+        localStorage.getItem('playback') || '{"volume":1}',
+    ).volume;
     return Math.max(0, Math.min(1, v * v * v));
 }
 
-// set volume via custom event (only works if inject.js setvolume listener is active)
-// With the simplified inject.js, this is a no-op but we keep it for compatibility
-function setVolume(volume) {
-    const e = new CustomEvent('setvolume', {
-        detail: { volume },
+// set the volume of Spotify's media element via inject.js,
+// lock = true keeps it fixed while recording
+function setVolume(volume, lock) {
+    const e = new CustomEvent('clipinc:setvolume', {
+        detail: JSON.stringify({ volume, lock }),
     });
     document.dispatchEvent(e);
 }
@@ -421,9 +494,9 @@ function hijackVolumeControl() {
     input.min = 0;
     input.max = 1;
     input.step = 0.01;
-    input.value = JSON.parse(localStorage.getItem('playback') || '{"volume":1}').volume.toFixed(
-        2
-    );
+    input.value = JSON.parse(
+        localStorage.getItem('playback') || '{"volume":1}',
+    ).volume.toFixed(2);
     input.classList.add('slider');
     input.addEventListener('input', handlePlayerVolumeInput);
 
@@ -433,7 +506,9 @@ function hijackVolumeControl() {
 
     // Try multiple selectors for the volume control (Spotify changes their UI frequently)
     const volumeBarElement =
-        document.querySelector('.control-button[aria-describedby="volume-icon"]') ||
+        document.querySelector(
+            '.control-button[aria-describedby="volume-icon"]',
+        ) ||
         document.querySelector('[data-testid="volume-bar"]') ||
         document.querySelector('.volume-bar');
 
@@ -442,7 +517,9 @@ function hijackVolumeControl() {
         volumeBarElement.style.display = 'none';
     } else {
         // Volume hijack is optional - recording still works without it
-        console.warn('clipinc: could not hijack volume control, continuing without it');
+        console.warn(
+            'clipinc: could not hijack volume control, continuing without it',
+        );
     }
 }
 
@@ -455,7 +532,9 @@ function releaseVolumeControl() {
     }
 
     const regularVolumeBar =
-        document.querySelector('.control-button[aria-describedby="volume-icon"]') ||
+        document.querySelector(
+            '.control-button[aria-describedby="volume-icon"]',
+        ) ||
         document.querySelector('[data-testid="volume-bar"]') ||
         document.querySelector('.volume-bar');
 
@@ -472,11 +551,6 @@ if (__clipincFirstLoad) {
         ({ command, data }, sender, sendResponse) => {
             switch (command) {
                 case 'prepareRecording': {
-                    // Ensure clipinc-ready class is set (may not be if injected programmatically)
-                    if (!document.querySelector('body.clipinc-ready')) {
-                        document.body.classList.add('clipinc-ready');
-                    }
-
                     const error = !getIsLocalDevice()
                         ? 'cannot record from remote device'
                         : undefined;
@@ -484,60 +558,54 @@ if (__clipincFirstLoad) {
 
                     if (!error) {
                         hijackVolumeControl();
-                        setVolume(1);
+                        setVolume(1, true);
                     }
 
                     sendResponse({ volume: oldVolume, error });
                     break;
                 }
                 case 'startRecording':
-                    // Start DOM polling to detect track changes
-                    startPolling();
+                    startSession();
                     break;
                 case 'stopRecording':
-                    // Stop DOM polling
-                    stopPolling();
-                    releaseVolumeControl();
-                    if (data && data.volume !== undefined) {
-                        setVolume(data.volume);
-                    }
+                    stopSession(data && data.volume);
                     break;
             }
-        }
+        },
     );
 }
 
 // ---- Player Control Functions ----
 
 function play() {
-    if (!isSpotifyPlaying()) {
-        const playButton = document.querySelector(
-            '[data-testid="control-button-playpause"]'
-        );
-        if (playButton) {
-            playButton.click();
-            return true;
-        }
+    if (isSpotifyPlaying()) return false;
+
+    const playButton = document.querySelector(
+        '[data-testid="control-button-playpause"]',
+    );
+    if (playButton) {
+        playButton.click();
+        return true;
     }
     return false;
 }
 
 function pause() {
-    const pauseButton = document.querySelector(
-        '.player-controls__buttons>[data-testid="control-button-playpause"]'
-    );
+    if (!isSpotifyPlaying()) return false;
 
+    const pauseButton = document.querySelector(
+        '[data-testid="control-button-playpause"]',
+    );
     if (pauseButton) {
         pauseButton.click();
         return true;
     }
-
     return false;
 }
 
 function skipBack() {
     const skipBackButton = document.querySelector(
-        '.player-controls__buttons [data-testid="control-button-skip-back"]'
+        '[data-testid="control-button-skip-back"]',
     );
 
     if (skipBackButton) {
@@ -550,26 +618,6 @@ function skipBack() {
 
 // ---- Initialization ----
 
-// Load inject.js to set the clipinc-ready class on the body
-function initClipinc() {
-    const s = document.createElement('script');
-    s.src = chrome.runtime.getURL('content/inject.js');
-    s.onload = function () {
-        this.remove();
-
-        // If player is already recording (e.g. page reload during recording),
-        // resume polling and volume hijack
-        chrome.storage.local.get('isRecording', ({ isRecording }) => {
-            if (isRecording) {
-                hijackVolumeControl();
-                startPolling();
-            }
-        });
-    };
-    (document.head || document.documentElement).appendChild(s);
-}
-
-// Initialize as soon as content script loads (only once)
 if (__clipincFirstLoad) {
-    initClipinc();
+    document.body.classList.add('clipinc-ready');
 }

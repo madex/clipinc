@@ -64,10 +64,39 @@ export class Recorder {
             return;
         }
 
-        this.input.disconnect();
+        // Disconnect processor from the audio graph
+        // input.disconnect() only removes outgoing connections (input→processor),
+        // the incoming connection (source→input) is unaffected
         this.processor.disconnect();
+        this.input.disconnect();
         delete this.processor;
-        this.worker.postMessage({ command: 'finish', track });
+
+        // Hand off the current worker for encoding — it will fire onComplete when done
+        const oldWorker = this.worker;
+        const onComplete = this.onComplete.bind(this);
+        const onError = this.onError.bind(this);
+
+        oldWorker.onmessage = (event) => {
+            const data = event.data;
+            switch (data.command) {
+                case 'progress':
+                    this.onEncodingProgress(this, data.progress);
+                    break;
+                case 'complete':
+                    onComplete(this, data.track, data.arrayBuffer);
+                    oldWorker.terminate();
+                    break;
+                case 'error':
+                    onError(this, data.message);
+                    oldWorker.terminate();
+                    break;
+            }
+        };
+        oldWorker.postMessage({ command: 'finish', track });
+
+        // Create a fresh worker immediately so startRecording() has a clean slate
+        this.worker = null; // prevent initWorker from terminating the old one
+        this.initWorker();
     }
 
     initWorker() {
@@ -83,7 +112,7 @@ export class Recorder {
                     this.onEncodingProgress(this, data.progress);
                     break;
                 case 'complete':
-                    this.onComplete(this, data.track);
+                    this.onComplete(this, data.track, data.arrayBuffer);
                     break;
                 case 'error':
                     this.onError(this, data.message);
@@ -103,7 +132,7 @@ export class Recorder {
 
     onEncodingProgress(recorder, progress) {}
 
-    onComplete(recorder, blob) {}
+    onComplete(recorder, track, arrayBuffer) {}
 
     onError(recorder, error) {}
 }

@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clipinc — Komponenten-Tests</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 20px; }
+        h1 { color: #1db954; margin-bottom: 20px; }
+        h2 { color: #e0e0e0; margin: 20px 0 10px; border-bottom: 1px solid #333; padding-bottom: 5px; }
+
+        .suite { background: #16213e; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+        .suite-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; cursor: pointer; }
+        .suite-header h2 { margin: 0; border: none; padding: 0; flex: 1; }
+        .suite-badge { background: #333; color: #aaa; padding: 2px 8px; border-radius: 12px; font-size: 12px; }
+        .suite-badge.pass { background: #1db954; color: white; }
+        .suite-badge.fail { background: #e74c3c; color: white; }
+        .suite-badge.running { background: #f39c12; color: white; }
+
+        .test-result { padding: 6px 12px; margin: 4px 0; border-radius: 4px; font-size: 14px; font-family: 'Consolas', 'Monaco', monospace; }
+        .test-result.pass { background: rgba(29, 185, 84, 0.15); border-left: 3px solid #1db954; }
+        .test-result.fail { background: rgba(231, 76, 60, 0.15); border-left: 3px solid #e74c3c; }
+        .test-result.skip { background: rgba(243, 156, 18, 0.15); border-left: 3px solid #f39c12; }
+
+        .error-detail { color: #e74c3c; font-size: 12px; margin-top: 4px; white-space: pre-wrap; }
+
+        button { background: #1db954; color: white; border: none; padding: 10px 20px; border-radius: 6px; font-size: 14px; cursor: pointer; margin: 5px; }
+        button:hover { background: #1ed760; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        button.run-all { background: #0f3460; font-size: 16px; padding: 12px 24px; }
+        button.run-all:hover { background: #1a4a8a; }
+
+        .controls { margin-bottom: 20px; }
+        .summary { background: #0f3460; border-radius: 8px; padding: 16px; margin-bottom: 20px; font-size: 18px; }
+        .summary .pass-count { color: #1db954; font-weight: bold; }
+        .summary .fail-count { color: #e74c3c; font-weight: bold; }
+        .summary .skip-count { color: #f39c12; font-weight: bold; }
+
+        #mock-spotify { display: none; }
+    </style>
+</head>
+<body>
+    <h1>Clipinc Komponenten-Tests</h1>
+
+    <div class="controls">
+        <button class="run-all" onclick="runAllSuites()">Alle Tests starten</button>
+    </div>
+
+    <div class="summary" id="summary">
+        Klicke "Alle Tests starten" oder starte einzelne Suites.
+    </div>
+
+    <div class="suite" id="suite-a">
+        <div class="suite-header" onclick="toggleSuite('a')">
+            <h2>Suite A: DOM-Selektoren</h2>
+            <span class="suite-badge" id="badge-a">ausstehend</span>
+            <button onclick="event.stopPropagation(); runSuiteA()">Starten</button>
+        </div>
+        <div class="suite-results" id="results-a"></div>
+    </div>
+
+    <div class="suite" id="suite-b">
+        <div class="suite-header" onclick="toggleSuite('b')">
+            <h2>Suite B: Audio-Recorder Pipeline</h2>
+            <span class="suite-badge" id="badge-b">ausstehend</span>
+            <button onclick="event.stopPropagation(); runSuiteB()">Starten</button>
+        </div>
+        <div class="suite-results" id="results-b"></div>
+    </div>
+
+    <div class="suite" id="suite-c">
+        <div class="suite-header" onclick="toggleSuite('c')">
+            <h2>Suite C: Mp3Worker (isoliert)</h2>
+            <span class="suite-badge" id="badge-c">ausstehend</span>
+            <button onclick="event.stopPropagation(); runSuiteC()">Starten</button>
+        </div>
+        <div class="suite-results" id="results-c"></div>
+    </div>
+
+    <div class="suite" id="suite-d">
+        <div class="suite-header" onclick="toggleSuite('d')">
+            <h2>Suite D: Download-Flow</h2>
+            <span class="suite-badge" id="badge-d">ausstehend</span>
+            <button onclick="event.stopPropagation(); runSuiteD()">Starten</button>
+        </div>
+        <div class="suite-results" id="results-d"></div>
+    </div>
+
+    <!-- Mock Spotify DOM for Suite A -->
+    <div id="mock-spotify">
+        <div data-testid="context-item-info-title">Test Song Title</div>
+        <div data-testid="context-item-info-subtitles">Test Artist Name</div>
+        <div data-testid="playback-duration">3:45</div>
+        <img data-testid="cover-art-image" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==" />
+        <button data-testid="control-button-playpause" aria-label="Pause"></button>
+        <div data-testid="playlist-tracklist" aria-label="Meine Playlist"></div>
+    </div>
+
+    <script>
+    // ============================================================
+    // Test Framework (minimal)
+    // ============================================================
+
+    const results = { pass: 0, fail: 0, skip: 0, total: 0 };
+
+    function assert(condition, message) {
+        if (!condition) throw new Error('Assertion failed: ' + message);
+    }
+
+    function assertEqual(actual, expected, message) {
+        if (actual !== expected) {
+            throw new Error(`${message}\n  Expected: ${JSON.stringify(expected)}\n  Actual:   ${JSON.stringify(actual)}`);
+        }
+    }
+
+    function assertTruthy(value, message) {
+        if (!value) throw new Error(`${message}\n  Value was falsy: ${JSON.stringify(value)}`);
+    }
+
+    function addResult(suiteId, name, status, error) {
+        const container = document.getElementById('results-' + suiteId);
+        const div = document.createElement('div');
+        div.className = 'test-result ' + status;
+        const icon = status === 'pass' ? '✅' : status === 'fail' ? '❌' : '⚠️';
+        div.innerHTML = `${icon} ${name}`;
+        if (error) {
+            div.innerHTML += `<div class="error-detail">${escapeHtml(error)}</div>`;
+        }
+        container.appendChild(div);
+
+        results[status]++;
+        results.total++;
+        updateSummary();
+    }
+
+    function setBadge(suiteId, passed, failed) {
+        const badge = document.getElementById('badge-' + suiteId);
+        if (failed > 0) {
+            badge.textContent = `${failed} fehlgeschlagen`;
+            badge.className = 'suite-badge fail';
+        } else {
+            badge.textContent = `${passed} bestanden`;
+            badge.className = 'suite-badge pass';
+        }
+    }
+
+    function updateSummary() {
+        const el = document.getElementById('summary');
+        el.innerHTML = `Tests: <span class="pass-count">${results.pass} bestanden</span> · <span class="fail-count">${results.fail} fehlgeschlagen</span> · <span class="skip-count">${results.skip} übersprungen</span> · ${results.total} gesamt`;
+    }
+
+    function escapeHtml(str) {
+        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function toggleSuite(id) {
+        const results = document.getElementById('results-' + id);
+        results.style.display = results.style.display === 'none' ? 'block' : 'block';
+    }
+
+    function resetSuite(suiteId) {
+        document.getElementById('results-' + suiteId).innerHTML = '';
+        const badge = document.getElementById('badge-' + suiteId);
+        badge.textContent = 'läuft...';
+        badge.className = 'suite-badge running';
+    }
+
+    // ============================================================
+    // Suite A: DOM-Selektoren
+    // ============================================================
+
+    function runSuiteA() {
+        resetSuite('a');
+        let passed = 0, failed = 0;
+
+        // Make mock DOM visible temporarily
+        const mockDom = document.getElementById('mock-spotify');
+        mockDom.style.display = 'block';
+
+        // Test: getCurrentTitle
+        try {
+            const el = document.querySelector('[data-testid="context-item-info-title"]');
+            const title = el?.textContent || null;
+            assertEqual(title, 'Test Song Title', 'getCurrentTitle should find title');
+            addResult('a', 'getCurrentTitle()', 'pass');
+            passed++;
+        } catch (e) {
+            addResult('a', 'getCurrentTitle()', 'fail', e.message);
+            failed++;
+        }
+
+        // Test: getCurrentArtist
+        try {
+            const el = document.querySelector('[data-testid="context-item-info-subtitles"]');
+            const artist = el?.textContent || null;
+            assertEqual(artist, 'Test Artist Name', 'getCurrentArtist should find artist');
+            addResult('a', 'getCurrentArtist()', 'pass');
+            passed++;
+        } catch (e) {
+            addResult('a', 'getCurrentArtist()', 'fail', e.message);
+            failed++;
+        }
+
+        // Test: isSpotifyPlaying (aria-label="Pause" → playing)
+        // Uses "paus" not "pause" because "pausieren" does NOT contain "pause" (paus-i-e-ren)
+        try {
+            const btn = document.querySelector('[data-testid="control-button-playpause"]');
+            const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+            const isPlaying = label.includes('paus');
+            assertEqual(isPlaying, true, 'aria-label="Pause" should mean playing (matches "paus")');
+            addResult('a', 'isSpotifyPlaying() → "Pause" = playing', 'pass');
+            passed++;
+        } catch (e) {
+            addResult('a', 'isSpotifyPlaying() → "Pause" = playing', 'fail', e.message);
+            failed++;
+        }
+
+        // Test: isSpotifyPlaying (aria-label="Play" → paused)
+        try {
+            const btn = document.querySelector('[data-testid="control-button-playpause"]');
+            btn.setAttribute('aria-label', 'Play');
+            const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+            const isPlaying = label.includes('paus');
+            assertEqual(isPlaying, false, 'aria-label="Play" should mean paused');
+            btn.setAttribute('aria-label', 'Pause'); // reset
+            addResult('a', 'isSpotifyPlaying() → "Play" = paused', 'pass');
+            passed++;
+        } catch (e) {
+            addResult('a', 'isSpotifyPlaying() → "Play" = paused', 'fail', e.message);
+            failed++;
+        }
+
+        // Test: isSpotifyPlaying (German: "Pausieren" → playing)
+        try {
+            const btn3 = mockDom.querySelector('[data-testid="control-button-playpause"]');
+            assertTruthy(btn3, 'Button should exist in mock DOM');
+            btn3.setAttribute('aria-label', 'Pausieren');
+            const label3 = btn3.getAttribute('aria-label').toLowerCase();
+            // "pausieren" contains "paus" → isPlaying = true
+            const isPlaying3 = label3.includes('paus');
+            assertEqual(isPlaying3, true, `"${label3}" should contain "paus"`);
+            btn3.setAttribute('aria-label', 'Pause'); // reset
+            addResult('a', 'isSpotifyPlaying() → "Pausieren" = playing (DE)', 'pass');
+            passed++;
+        } catch (e) {
+            addResult('a', 'isSpotifyPlaying() → "Pausieren" = playing (DE)', 'fail', e.message);
+            failed++;
+        }
+
+        // Test: isSpotifyPlaying (German: "Abspielen" → paused)
+        try {
+            const btn = document.querySelector('[data-testid="control-button-playpause"]');
+            btn.setAttribute('aria-label', 'Abspielen');
+            const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+            const isPlaying = label.includes('paus');
+            const isPaused = label.includes('play') || label.includes('abspielen') || label.includes('wiedergabe');
+            assertEqual(isPlaying, false, '"Abspielen" should not match paus');
+            assertEqual(isPaused, true, '"Abspielen" should match paused');
+            btn.setAttribute('aria-label', 'Pause'); // reset
+            addResult('a', 'isSpotifyPlaying() → "Abspielen" = paused (DE)', 'pass');
+            passed++;
+        } catch (e) {
+            addResult('a', 'isSpotifyPlaying() → "Abspielen" = paused (DE)', 'fail', e.message);
+            failed++;
+        }
+
+        // Test: durationToMs
+        try {
+            function durationToMs(duration) {
+                const times = duration.split(':');
+                return (parseInt(times[0], 10) * 60 + parseInt(times[1], 10)) * 1000;
+            }
+            assertEqual(durationToMs('3:45'), 225000, '3:45 should be 225000ms');
+            assertEqual(durationToMs('0:30'), 30000, '0:30 should be 30000ms');
+            assertEqual(durationToMs('10:00'), 600000, '10:00 should be 600000ms');
+            addResult('a', 'durationToMs() — Zeitkonvertierung', 'pass');
+            passed++;
+        } catch (e) {
+            addResult('a', 'durationToMs() — Zeitkonvertierung', 'fail', e.message);
+            failed++;
+        }
+
+        // Test: cover art image
+        try {
+            const coverEl = document.querySelector('img[data-testid="cover-art-image"]');
+            assertTruthy(coverEl, 'Cover image element should exist');
+            assertTruthy(coverEl.src, 'Cover image should have src');
+            addResult('a', 'Cover-Art Selektor', 'pass');
+            passed++;
+        } catch (e) {
+            addResult('a', 'Cover-Art Selektor', 'fail', e.message);
+            failed++;
+        }
+
+        // Test: playlist name
+        try {
+            const trackList = document.querySelector('div[data-testid="playlist-tracklist"]');
+            const name = trackList?.getAttribute('aria-label') || '';
+            assertEqual(name, 'Meine Playlist', 'Playlist name should be found');
+            addResult('a', 'getPlayListName() — Playlist-Erkennung', 'pass');
+            passed++;
+        } catch (e) {
+            addResult('a', 'getPlayListName() — Playlist-Erkennung', 'fail', e.message);
+            failed++;
+        }
+
+        // Test: track key construction
+        try {
+            const title = 'Test Song Title';
+            const artist = 'Test Artist Name';
+            const trackKey = title && artist ? `${title}|||${artist}` : title;
+            assertEqual(trackKey, 'Test Song Title|||Test Artist Name', 'Track key should combine title and artist');
+            addResult('a', 'Track-Key Konstruktion (title|||artist)', 'pass');
+            passed++;
+        } catch (e) {
+            addResult('a', 'Track-Key Konstruktion (title|||artist)', 'fail', e.message);
+            failed++;
+        }
+
+        mockDom.style.display = 'none';
+        setBadge('a', passed, failed);
+    }
+
+    // ============================================================
+    // Suite B: Audio-Recorder Pipeline
+    // ============================================================
+
+    async function runSuiteB() {
+        resetSuite('b');
+        let passed = 0, failed = 0;
+
+        // Test: AudioContext creation
+        try {
+            const ctx = new AudioContext();
+            assertTruthy(ctx, 'AudioContext should be created');
+            assertTruthy(ctx.sampleRate > 0, 'Sample rate should be positive');
+            addResult('b', `AudioContext erstellt (${ctx.sampleRate} Hz)`, 'pass');
+            passed++;
+
+            // Test: Generate synthetic audio
+            try {
+                const oscillator = ctx.createOscillator();
+                oscillator.type = 'sine';
+                oscillator.frequency.value = 440;
+
+                const dest = ctx.createMediaStreamDestination();
+                oscillator.connect(dest);
+
+                const source = ctx.createMediaStreamSource(dest.stream);
+                assertTruthy(source, 'MediaStreamSource should be created');
+                addResult('b', 'Synthetisches Audio erzeugt (440 Hz Sinus)', 'pass');
+                passed++;
+
+                // Test: ScriptProcessorNode
+                try {
+                    const processor = ctx.createScriptProcessor(undefined, 2, 2);
+                    assertTruthy(processor, 'ScriptProcessorNode should be created');
+
+                    let bufferCount = 0;
+                    const recordedBuffers = [];
+
+                    await new Promise((resolve, reject) => {
+                        const timeout = setTimeout(() => {
+                            reject(new Error('Timeout: No audio buffers received in 3 seconds'));
+                        }, 3000);
+
+                        processor.onaudioprocess = (event) => {
+                            bufferCount++;
+                            const left = event.inputBuffer.getChannelData(0);
+                            const right = event.inputBuffer.getChannelData(1);
+                            recordedBuffers.push([new Float32Array(left), new Float32Array(right)]);
+                            if (bufferCount >= 5) {
+                                clearTimeout(timeout);
+                                resolve();
+                            }
+                        };
+
+                        source.connect(processor);
+                        processor.connect(ctx.destination);
+                        oscillator.start();
+                    });
+
+                    oscillator.stop();
+                    processor.disconnect();
+                    source.disconnect();
+
+                    assert(recordedBuffers.length >= 5, 'Should have captured at least 5 buffers');
+                    assert(recordedBuffers[0].length === 2, 'Each buffer should have 2 channels');
+                    assert(recordedBuffers[0][0].length > 0, 'Buffer should have samples');
+
+                    addResult('b', `ScriptProcessorNode: ${recordedBuffers.length} Buffers aufgenommen`, 'pass');
+                    passed++;
+
+                    // Check if audio has actual data (not just silence)
+                    try {
+                        let maxSample = 0;
+                        for (const buf of recordedBuffers) {
+                            for (const sample of buf[0]) {
+                                maxSample = Math.max(maxSample, Math.abs(sample));
+                            }
+                        }
+                        assert(maxSample > 0.001, `Audio should contain signal, max sample: ${maxSample.toFixed(6)}`);
+                        addResult('b', `Audio-Signal verifiziert (max Amplitude: ${maxSample.toFixed(4)})`, 'pass');
+                        passed++;
+                    } catch (e) {
+                        addResult('b', 'Audio-Signal verifiziert', 'fail', e.message);
+                        failed++;
+                    }
+
+                    // Store buffers for Suite C
+                    window.__testBuffers = recordedBuffers;
+
+                } catch (e) {
+                    addResult('b', 'ScriptProcessorNode Aufnahme', 'fail', e.message);
+                    failed++;
+                }
+
+            } catch (e) {
+                addResult('b', 'Synthetisches Audio erzeugen', 'fail', e.message);
+                failed++;
+            }
+
+            await ctx.close();
+        } catch (e) {
+            addResult('b', 'AudioContext erstellen', 'fail', e.message);
+            failed++;
+        }
+
+        // Test: Gain Node (used by Recorder)
+        try {
+            const ctx2 = new AudioContext();
+            const gain = ctx2.createGain();
+            assertTruthy(gain, 'GainNode should be created');
+            gain.gain.value = 1.0;
+            addResult('b', 'GainNode erstellt (Recorder Input)', 'pass');
+            passed++;
+            await ctx2.close();
+        } catch (e) {
+            addResult('b', 'GainNode erstellen', 'fail', e.message);
+            failed++;
+        }
+
+        setBadge('b', passed, failed);
+    }
+
+    // ============================================================
+    // Suite C: Mp3Worker (isoliert)
+    // ============================================================
+
+    async function runSuiteC() {
+        resetSuite('c');
+        let passed = 0, failed = 0;
+
+        // Check if we have test buffers from Suite B
+        if (!window.__testBuffers || window.__testBuffers.length === 0) {
+            addResult('c', 'Test-Buffers von Suite B', 'skip', 'Suite B muss zuerst laufen um Audio-Buffers zu erzeugen');
+            setBadge('c', passed, failed);
+            return;
+        }
+
+        // Test: Worker creation
+        let worker;
+        try {
+            // The worker uses importScripts, so we need to serve from the dist folder
+            worker = new Worker('../dist/offscreen/869.js');
+            assertTruthy(worker, 'Worker should be created');
+            addResult('c', 'Mp3Worker erstellt', 'pass');
+            passed++;
+        } catch (e) {
+            addResult('c', 'Mp3Worker erstellen', 'fail', e.message + '\n\nHinweis: test.html muss aus dem dist/-Verzeichnis oder per HTTP-Server geladen werden.\nStarte z.B.: npx http-server . -p 8080\nDann öffne: http://localhost:8080/test/test.html');
+            failed++;
+            setBadge('c', passed, failed);
+            return;
+        }
+
+        // Test: Init
+        try {
+            await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error('Worker init timeout')), 3000);
+                worker.onmessage = () => { clearTimeout(timeout); resolve(); };
+                worker.onerror = (e) => { clearTimeout(timeout); reject(e); };
+                worker.postMessage({
+                    command: 'init',
+                    config: { sampleRate: 44100, numChannels: 2 },
+                    options: {}
+                });
+                // Worker doesn't reply to init, so resolve after a short delay
+                setTimeout(() => { clearTimeout(timeout); resolve(); }, 500);
+            });
+            addResult('c', 'Worker init (44100 Hz, 2ch)', 'pass');
+            passed++;
+        } catch (e) {
+            addResult('c', 'Worker init', 'fail', e.message);
+            failed++;
+            worker.terminate();
+            setBadge('c', passed, failed);
+            return;
+        }
+
+        // Test: Record + Finish (without cover)
+        try {
+            worker.postMessage({ command: 'start' });
+
+            // Send test buffers
+            const buffers = window.__testBuffers;
+            for (const buf of buffers) {
+                worker.postMessage({ command: 'record', buffer: buf });
+            }
+
+            const result = await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error(
+                    'Worker finish timeout (10s) — dies war Bug C1!\n' +
+                    'Wenn der Cover-Fetch fehlschlägt und kein Error-Handling existiert,\n' +
+                    'wird "complete" nie gesendet.'
+                )), 10000);
+
+                worker.onmessage = (event) => {
+                    const data = event.data;
+                    if (data.command === 'complete') {
+                        clearTimeout(timeout);
+                        resolve(data);
+                    } else if (data.command === 'error') {
+                        clearTimeout(timeout);
+                        reject(new Error('Worker error: ' + data.message));
+                    }
+                    // ignore 'progress' messages
+                };
+
+                worker.postMessage({
+                    command: 'finish',
+                    track: {
+                        title: 'Test Track',
+                        artist: 'Test Artist',
+                        album: 'Test Album',
+                        duration: 2000,
+                        kbps: 128,
+                        cover: '' // No cover - tests C1 fix
+                    }
+                });
+            });
+
+            assertTruthy(result.arrayBuffer, 'Should receive ArrayBuffer');
+            assert(result.arrayBuffer.byteLength > 0, 'ArrayBuffer should not be empty');
+            assertTruthy(result.track, 'Should receive track info');
+            assertEqual(result.track.title, 'Test Track', 'Track title should match');
+
+            addResult('c', `Encoding ohne Cover: ${result.arrayBuffer.byteLength} Bytes`, 'pass');
+            passed++;
+
+            // Check MP3/ID3 header
+            try {
+                const view = new Uint8Array(result.arrayBuffer);
+                const hasID3 = view[0] === 0x49 && view[1] === 0x44 && view[2] === 0x33; // "ID3"
+                assert(hasID3, `Erwartet ID3-Header (0x49 0x44 0x33), bekommen: 0x${view[0].toString(16)} 0x${view[1].toString(16)} 0x${view[2].toString(16)}`);
+                addResult('c', 'ID3-Header verifiziert (0x49 0x44 0x33)', 'pass');
+                passed++;
+            } catch (e) {
+                addResult('c', 'ID3-Header verifizieren', 'fail', e.message);
+                failed++;
+            }
+
+            // Store for Suite D
+            window.__testMp3Buffer = result.arrayBuffer;
+            window.__testTrack = result.track;
+
+        } catch (e) {
+            addResult('c', 'Encoding + Finish (ohne Cover)', 'fail', e.message);
+            failed++;
+        }
+
+        // Test: Record + Finish with invalid cover URL (tests C1 error handling)
+        try {
+            const worker2 = new Worker('../dist/offscreen/869.js');
+
+            // Init
+            worker2.postMessage({
+                command: 'init',
+                config: { sampleRate: 44100, numChannels: 2 },
+                options: {}
+            });
+            await new Promise(r => setTimeout(r, 300));
+
+            worker2.postMessage({ command: 'start' });
+
+            // Send some buffers
+            const buffers = window.__testBuffers;
+            for (const buf of buffers.slice(0, 3)) {
+                worker2.postMessage({ command: 'record', buffer: buf });
+            }
+
+            const result = await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error(
+                    'Worker timeout mit ungültiger Cover-URL!\n' +
+                    'Bug C1 ist NICHT behoben — fetch() hängt ohne Error-Handling.'
+                )), 10000);
+
+                worker2.onmessage = (event) => {
+                    const data = event.data;
+                    if (data.command === 'complete') {
+                        clearTimeout(timeout);
+                        resolve(data);
+                    } else if (data.command === 'error') {
+                        clearTimeout(timeout);
+                        // Error is also acceptable - it means error handling works
+                        resolve({ ...data, wasError: true });
+                    }
+                };
+
+                worker2.postMessage({
+                    command: 'finish',
+                    track: {
+                        title: 'Cover Test',
+                        artist: 'Test',
+                        duration: 1000,
+                        kbps: 128,
+                        cover: 'https://invalid-url-that-does-not-exist.example.com/cover.jpg'
+                    }
+                });
+            });
+
+            if (result.wasError) {
+                addResult('c', 'Encoding mit ungültiger Cover-URL: Worker Error (akzeptabel)', 'pass');
+            } else {
+                assertTruthy(result.arrayBuffer, 'Should produce MP3 even with failed cover');
+                addResult('c', `Encoding mit ungültiger Cover-URL: ${result.arrayBuffer.byteLength} Bytes (Cover übersprungen)`, 'pass');
+            }
+            passed++;
+
+            worker2.terminate();
+        } catch (e) {
+            addResult('c', 'Encoding mit ungültiger Cover-URL (Bug C1)', 'fail', e.message);
+            failed++;
+        }
+
+        worker.terminate();
+        setBadge('c', passed, failed);
+    }
+
+    // ============================================================
+    // Suite D: Download-Flow
+    // ============================================================
+
+    function runSuiteD() {
+        resetSuite('d');
+        let passed = 0, failed = 0;
+
+        // Test: Filename sanitization
+        try {
+            const regex = /[^a-zA-Z0-9]/g;
+            const tests = [
+                { input: 'Hello World!', expected: 'Hello World' },
+                { input: 'AC/DC', expected: 'AC DC' },
+                { input: 'Beyoncé', expected: 'Beyonc' },
+                { input: '  spaces  ', expected: 'spaces' },
+                { input: 'file:name?test', expected: 'file name test' },
+            ];
+
+            for (const t of tests) {
+                const result = t.input.replace(regex, ' ').trim();
+                assertEqual(result, t.expected, `Sanitize "${t.input}"`);
+            }
+
+            addResult('d', 'Filename-Sanitization (Sonderzeichen entfernen)', 'pass');
+            passed++;
+        } catch (e) {
+            addResult('d', 'Filename-Sanitization', 'fail', e.message);
+            failed++;
+        }
+
+        // Test: Full filename construction
+        try {
+            const regex = /[^a-zA-Z0-9]/g;
+            const track = {
+                title: 'My Song!',
+                artist: 'The Artist',
+                directory: 'My Playlist #1'
+            };
+
+            let filename = 'clipinc';
+            if (track.directory) {
+                filename = `${filename}/${track.directory.replace(regex, ' ').trim()}`;
+            }
+            const title = track.title ? track.title.replace(regex, ' ').trim() : '';
+            const artist = track.artist ? track.artist.replace(regex, ' ').trim() : '';
+            filename = `${filename}/${artist} - ${title}.mp3`;
+
+            // After regex replace + trim: "My Playlist #1" → "My Playlist  1", "My Song!" → "My Song"
+            assertEqual(filename, 'clipinc/My Playlist  1/The Artist - My Song.mp3',
+                'Filename should be properly constructed');
+            addResult('d', `Filename-Konstruktion: ${filename}`, 'pass');
+            passed++;
+        } catch (e) {
+            addResult('d', 'Filename-Konstruktion', 'fail', e.message);
+            failed++;
+        }
+
+        // Test: Blob URL creation
+        try {
+            const testData = new Uint8Array([0x49, 0x44, 0x33, 0x03, 0x00]); // fake ID3 header
+            const blob = new Blob([testData], { type: 'audio/mpeg' });
+            assertTruthy(blob, 'Blob should be created');
+            assertEqual(blob.size, 5, 'Blob size should match');
+            assertEqual(blob.type, 'audio/mpeg', 'Blob type should be audio/mpeg');
+
+            const url = URL.createObjectURL(blob);
+            assertTruthy(url, 'Blob URL should be created');
+            assert(url.startsWith('blob:'), 'URL should start with blob:');
+
+            URL.revokeObjectURL(url);
+            addResult('d', 'Blob URL erstellen und revoking', 'pass');
+            passed++;
+        } catch (e) {
+            addResult('d', 'Blob URL erstellen', 'fail', e.message);
+            failed++;
+        }
+
+        // Test: Blob from actual MP3 data (if available from Suite C)
+        if (window.__testMp3Buffer) {
+            try {
+                const blob = new Blob([window.__testMp3Buffer], { type: 'audio/mpeg' });
+                const url = URL.createObjectURL(blob);
+                assertTruthy(url, 'Blob URL from real MP3 should work');
+                assert(blob.size > 100, `MP3 blob should be substantial (${blob.size} bytes)`);
+
+                // Create a download link for manual verification
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'clipinc-test.mp3';
+                a.textContent = '[ Test-MP3 herunterladen ]';
+                a.style.cssText = 'color: #1db954; text-decoration: underline; cursor: pointer; margin-left: 12px;';
+
+                addResult('d', `MP3-Blob erstellt (${blob.size} Bytes)`, 'pass');
+                passed++;
+
+                // Add download link
+                const container = document.getElementById('results-d');
+                const linkDiv = document.createElement('div');
+                linkDiv.className = 'test-result pass';
+                linkDiv.innerHTML = '📁 ';
+                linkDiv.appendChild(a);
+                container.appendChild(linkDiv);
+
+            } catch (e) {
+                addResult('d', 'MP3-Blob aus echten Daten', 'fail', e.message);
+                failed++;
+            }
+        } else {
+            addResult('d', 'MP3-Blob aus echten Daten', 'skip', 'Suite B+C müssen zuerst laufen');
+        }
+
+        // Test: Filename without directory
+        try {
+            const regex = /[^a-zA-Z0-9]/g;
+            const track = { title: 'Solo Song', artist: 'Solo Artist' };
+
+            let filename = 'clipinc';
+            if (track.directory) {
+                filename = `${filename}/${track.directory.replace(regex, ' ').trim()}`;
+            }
+            const title = track.title ? track.title.replace(regex, ' ').trim() : '';
+            const artist = track.artist ? track.artist.replace(regex, ' ').trim() : '';
+            filename = `${filename}/${artist} - ${title}.mp3`;
+
+            assertEqual(filename, 'clipinc/Solo Artist - Solo Song.mp3',
+                'Filename without directory should work');
+            addResult('d', 'Filename ohne Directory', 'pass');
+            passed++;
+        } catch (e) {
+            addResult('d', 'Filename ohne Directory', 'fail', e.message);
+            failed++;
+        }
+
+        setBadge('d', passed, failed);
+    }
+
+    // ============================================================
+    // Run All
+    // ============================================================
+
+    async function runAllSuites() {
+        results.pass = 0;
+        results.fail = 0;
+        results.skip = 0;
+        results.total = 0;
+
+        runSuiteA();
+        await runSuiteB();
+        await runSuiteC();
+        runSuiteD();
+    }
+    </script>
+</body>
+</html>

@@ -33,6 +33,10 @@ function start() {
 
 function record(buffer) {
     //console.debug('record', bufferCount, buffer);
+    if (!recBuffers) {
+        // Safety: if record is called before start, initialize buffers
+        recBuffers = [];
+    }
     bufferCount++;
     recBuffers.push(buffer);
 }
@@ -70,21 +74,33 @@ function finish(track) {
         fileReader.readAsArrayBuffer(blob);
     });
 
-    const imagePromise = fetch(track.cover).then((res) =>
-        res.arrayBuffer().then((arrayBuffer) => ({
-            arrayBuffer,
-            mimeType: res.headers.get('Content-Type'),
-        }))
-    );
+    // Cover fetch is optional - if it fails, we still produce the MP3 without cover art
+    let imagePromise;
+    if (track.cover && track.cover.length > 0) {
+        imagePromise = fetch(track.cover)
+            .then((res) => {
+                if (!res.ok) throw new Error(`Cover fetch returned ${res.status}`);
+                return res.arrayBuffer().then((arrayBuffer) => ({
+                    arrayBuffer,
+                    mimeType: res.headers.get('Content-Type') || 'image/jpeg',
+                }));
+            })
+            .catch((err) => {
+                console.warn('Mp3Worker: cover fetch failed, proceeding without cover:', err.message);
+                return null;
+            });
+    } else {
+        imagePromise = Promise.resolve(null);
+    }
 
     Promise.all([filePromise, imagePromise]).then(([file, cover]) => {
-        console.debug('got file and image');
+        console.debug('got file', cover ? 'and image' : '(no cover)');
 
         const writer = new ID3Writer(file);
         writer
-            .setFrame('TPE1', [track.artist])
-            .setFrame('TIT2', track.title)
-            .setFrame('TLEN', track.duration);
+            .setFrame('TPE1', [track.artist || 'Unknown'])
+            .setFrame('TIT2', track.title || 'Unknown')
+            .setFrame('TLEN', track.duration || 0);
 
         if (cover && cover.arrayBuffer && cover.arrayBuffer.byteLength > 0) {
             writer.setFrame('APIC', {
@@ -122,11 +138,17 @@ function finish(track) {
         writer.addTag();
 
         console.debug('done');
-        track.url = writer.getURL();
+        // Send the raw ArrayBuffer instead of a blob URL.
+        // Blob URLs are context-local and cannot cross worker boundaries.
+        const taggedArrayBuffer = writer.arrayBuffer;
         self.postMessage({
             command: 'complete',
             track,
-        });
+            arrayBuffer: taggedArrayBuffer,
+        }, [taggedArrayBuffer]);
+    }).catch((err) => {
+        console.error('Mp3Worker: encoding/tagging failed:', err);
+        self.postMessage({ command: 'error', message: 'Encoding failed: ' + err.message });
     });
 }
 

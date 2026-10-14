@@ -116,7 +116,8 @@ export function App() {
                         setSongCount(data.songCount);
                         break;
                     default:
-                        throw Error(`Unknown command received: ${command}`);
+                        // Ignore messages not intended for the popup (e.g. offscreen: prefixed messages)
+                        break;
                 }
             });
         },

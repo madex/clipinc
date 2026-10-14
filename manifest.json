@@ -33,13 +33,14 @@
         "tabs",
         "tabCapture",
         "activeTab",
+        "scripting",
         "storage",
         "downloads",
         "downloads.shelf",
         "notifications",
         "offscreen"
     ],
-    "version": "1.13.0",
+    "version": "1.14.0",
     "web_accessible_resources": [
         {
             "resources": ["content/inject.js"],

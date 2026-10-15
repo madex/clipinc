@@ -144,7 +144,6 @@ function stopSession(volume) {
     clearInterval(pollingInterval);
     pollingInterval = null;
 
-    releaseVolumeControl();
     setVolume(volume !== undefined ? volume : 1, false);
 }
 
@@ -233,13 +232,6 @@ function getCurrentArtist() {
         '[data-testid="context-item-info-subtitles"]',
     );
     return el?.textContent || null;
-}
-// handle player volume change event
-function handlePlayerVolumeInput(event) {
-    chrome.runtime.sendMessage({
-        command: 'setVolume',
-        data: { volume: parseFloat(event.target.value) },
-    });
 }
 
 // ---- Track Info Functions ----
@@ -481,68 +473,6 @@ function setVolume(volume, lock) {
     document.dispatchEvent(e);
 }
 
-// overwrite spotify volume control, to prevent gain change while recording
-function hijackVolumeControl() {
-    const hijackedVolumeBar = document.querySelector('.volume-bar--hijacked');
-
-    if (hijackedVolumeBar !== null) {
-        return;
-    }
-
-    const input = document.createElement('input');
-    input.type = 'range';
-    input.min = 0;
-    input.max = 1;
-    input.step = 0.01;
-    input.value = JSON.parse(
-        localStorage.getItem('playback') || '{"volume":1}',
-    ).volume.toFixed(2);
-    input.classList.add('slider');
-    input.addEventListener('input', handlePlayerVolumeInput);
-
-    const volumeBar = document.createElement('div');
-    volumeBar.appendChild(input);
-    volumeBar.classList.add('volume-bar', 'volume-bar--hijacked');
-
-    // Try multiple selectors for the volume control (Spotify changes their UI frequently)
-    const volumeBarElement =
-        document.querySelector(
-            '.control-button[aria-describedby="volume-icon"]',
-        ) ||
-        document.querySelector('[data-testid="volume-bar"]') ||
-        document.querySelector('.volume-bar');
-
-    if (volumeBarElement) {
-        volumeBarElement.parentNode.appendChild(volumeBar);
-        volumeBarElement.style.display = 'none';
-    } else {
-        // Volume hijack is optional - recording still works without it
-        console.warn(
-            'clipinc: could not hijack volume control, continuing without it',
-        );
-    }
-}
-
-// remove custom volume control and show old one again
-function releaseVolumeControl() {
-    const volumeBar = document.querySelector('.volume-bar--hijacked');
-
-    if (volumeBar !== null) {
-        volumeBar.parentNode.removeChild(volumeBar);
-    }
-
-    const regularVolumeBar =
-        document.querySelector(
-            '.control-button[aria-describedby="volume-icon"]',
-        ) ||
-        document.querySelector('[data-testid="volume-bar"]') ||
-        document.querySelector('.volume-bar');
-
-    if (regularVolumeBar) {
-        regularVolumeBar.style.display = '';
-    }
-}
-
 // ---- Message Listener ----
 // Only register once to prevent double handling from manifest + programmatic injection
 
@@ -557,7 +487,6 @@ if (__clipincFirstLoad) {
                     const oldVolume = getVolume();
 
                     if (!error) {
-                        hijackVolumeControl();
                         setVolume(1, true);
                     }
 

@@ -67,11 +67,6 @@ module.exports = [
                 inject: './content/inject.js',
             },
             output: { path: path.join(outputPath, 'content') },
-            plugins: [
-                new CopyPlugin({
-                    patterns: [{ from: './content/slider.css', to: '.' }],
-                }),
-            ],
         });
     },
     // 3. Service Worker (replaces old backgroundPage)

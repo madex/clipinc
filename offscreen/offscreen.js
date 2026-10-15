@@ -3,7 +3,6 @@ import { Recorder } from '../background-page/recorder';
 let audioCtx = null;
 let mediaRecorder = null;
 let stream = null;
-let audioElement = null;
 // tracks handed to a worker for encoding that have not been downloaded yet,
 // the service worker must not close this document while encodings are pending
 let pendingEncodings = 0;
@@ -40,12 +39,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         case 'offscreen:getPending':
             sendResponse({ pendingEncodings });
-            break;
-
-        case 'offscreen:setVolume':
-            if (audioElement) {
-                audioElement.volume = data.volume;
-            }
             break;
 
         case 'offscreen:spotifyPlay':
@@ -97,7 +90,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
 });
 
-async function handleStartCapture({ streamId, volume }) {
+async function handleStartCapture({ streamId }) {
     // Use the streamId to get a MediaStream
     stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -128,34 +121,8 @@ async function handleStartCapture({ streamId, volume }) {
     mediaRecorder.onComplete = handleRecordingComplete;
     mediaRecorder.onError = handleRecordingError;
 
-    // Restore audio for the user via Audio element
-    audioElement = new Audio();
-    audioElement.srcObject = stream;
-    audioElement.volume = volume;
-
-    try {
-        await audioElement.play();
-        console.debug('Offscreen: audio playback started via Audio element');
-    } catch (err) {
-        console.warn(
-            'Offscreen: Audio element play() failed, using AudioContext fallback:',
-            err.message,
-        );
-        // Fallback: route the captured audio through AudioContext destination
-        // This makes the audio audible even when autoplay is blocked on Audio elements
-        try {
-            const playbackSource = audioCtx.createMediaStreamSource(stream);
-            playbackSource.connect(audioCtx.destination);
-            console.debug(
-                'Offscreen: audio playback started via AudioContext destination',
-            );
-        } catch (fallbackErr) {
-            console.error(
-                'Offscreen: AudioContext fallback also failed:',
-                fallbackErr.message,
-            );
-        }
-    }
+    // the captured tab is muted by Chrome and the stream is not played back,
+    // so the recording runs silently
 }
 
 function handleStopCapture() {
@@ -165,11 +132,6 @@ function handleStopCapture() {
         // get downloaded, only the unfinished track is discarded
         mediaRecorder.cancelRecording();
         mediaRecorder.worker.terminate();
-    }
-    // Stop audio playback first
-    if (audioElement) {
-        audioElement.pause();
-        audioElement.srcObject = null;
     }
     if (audioCtx) {
         audioCtx.close();
@@ -182,7 +144,6 @@ function handleStopCapture() {
     audioCtx = null;
     mediaRecorder = null;
     stream = null;
-    audioElement = null;
 }
 
 // Send completed recording to service worker for download

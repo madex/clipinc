@@ -30,7 +30,7 @@ async function ensureOffscreenDocument() {
     } else {
         creatingOffscreen = chrome.offscreen.createDocument({
             url: 'offscreen/index.html',
-            reasons: ['USER_MEDIA', 'AUDIO_PLAYBACK'],
+            reasons: ['USER_MEDIA'],
             justification: 'Recording tab audio and encoding to MP3',
         });
         await creatingOffscreen;
@@ -148,12 +148,6 @@ chrome.runtime.onMessage.addListener(
                 stopRecording();
                 break;
 
-            case 'setVolume':
-                chrome.storage.local.set({ volume: data.volume });
-                sendToOffscreen('offscreen:setVolume', { volume: data.volume });
-                break;
-
-            // From offscreen: recording complete, download the MP3
             case 'offscreen:downloadComplete':
                 console.debug(
                     'SW: recording complete for',
@@ -212,10 +206,6 @@ async function startCapture() {
         await chrome.scripting.executeScript({
             target: { tabId: tab.id },
             files: ['content/content.js'],
-        });
-        await chrome.scripting.insertCSS({
-            target: { tabId: tab.id },
-            files: ['content/slider.css'],
         });
         // Wait a moment for the content script to initialize
         await new Promise((r) => setTimeout(r, 1500));

@@ -20,7 +20,6 @@
             "run_at": "document_start"
         },
         {
-            "css": ["content/slider.css"],
             "js": ["content/content.js"],
             "matches": ["https://open.spotify.com/*"]
         }

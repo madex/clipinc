@@ -2,6 +2,11 @@ const OPTIONS = {
     numChannels: 2,
 };
 
+// Spotify delivers loud masters close to 0 dBFS, MP3 encoding then overshoots
+// above full scale and players clip it (audible as crackling in loud parts).
+// -1.5 dB of headroom keeps the decoded peaks below 1.0.
+const HEADROOM_GAIN = Math.pow(10, -1.5 / 20);
+
 // copied next to the offscreen document by webpack, it must not be bundled
 // because worklets cannot load the core-js imports babel adds
 const WORKLET_URL = 'recorder-worklet.js';
@@ -17,6 +22,7 @@ export class Recorder {
         this.context = source.context;
 
         this.input = this.context.createGain();
+        this.input.gain.value = HEADROOM_GAIN;
         source.connect(this.input);
 
         this.initWorker();

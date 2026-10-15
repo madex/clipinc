@@ -1,67 +1,69 @@
-<h1 align="center"><a href="https://tobit.software/clipinc" target="_blank">clipinc®</a></h1>
+<h1 align="center"><a href="https://github.com/madex/clipinc" target="_blank">clipinc</a></h1>
 
 <p align="center">
     <strong>Records Spotify songs in your browser as you listen to them</strong>
 </p>
 
 <p align="center">
-    <a href="https://chrome.google.com/webstore/detail/clipinc%C2%AE/oppggbgnmeainpanihcbcdniomfobmec" target="_blank">
+    <a href="https://github.com/madex/clipinc/releases/latest" target="_blank">
         <img
-            alt="Chrome Web Store"
-            src="https://img.shields.io/chrome-web-store/v/oppggbgnmeainpanihcbcdniomfobmec?style=for-the-badge&color=%2310B981&labelColor=%2327272A"
+            alt="Latest release"
+            src="https://img.shields.io/github/v/release/madex/clipinc?style=for-the-badge&color=%2310B981&labelColor=%2327272A"
         />
     </a>
-    <a href="https://chrome.google.com/webstore/detail/clipinc%C2%AE/oppggbgnmeainpanihcbcdniomfobmec" target="_blank">
+    <a href="https://github.com/madex/clipinc/blob/main/LICENSE" target="_blank">
         <img
-            alt="Chrome Web Store"
-            src="https://img.shields.io/chrome-web-store/users/oppggbgnmeainpanihcbcdniomfobmec?style=for-the-badge&color=%230EA5E9&labelColor=%2327272A"
-        />
-    </a>
-    <a href="https://github.com/TobitSoftware/clipinc/blob/main/LICENSE" target="_blank">
-        <img
-            alt="GitHub"
-            src="https://img.shields.io/github/license/TobitSoftware/clipinc?style=for-the-badge&color=%236366F1&labelColor=%2327272A"
+            alt="MIT License"
+            src="https://img.shields.io/github/license/madex/clipinc?style=for-the-badge&color=%236366F1&labelColor=%2327272A"
         />
     </a>
 </p>
 
 <p align="center">
-    <a href="#-downloads"><b>Downloads</b></a>
+    <a href="#-installation"><b>Installation</b></a>
+    <span>  •  </span>
+    <a href="#-usage"><b>Usage</b></a>
     <span>  •  </span>
     <a href="#-local-development"><b>Local Development</b></a>
-    <span>  •  </span>
-    <a href="#-contribute"><b>Contribute</b></a>
 </p>
- 
+
 ---
 
 This browser extension records Spotify songs as you listen to them and saves
-them to your default download directory.
+them as MP3 files (with title, artist, album and cover) to your default download
+directory.
 
-For more information visit our [website](https://tobit.software/clipinc) (in
-German).
+clipinc was originally developed by
+[Tobit Software](https://github.com/TobitSoftware/clipinc) and is no longer
+available in the Chrome Web Store. This fork keeps it working: it is ported to
+Manifest V3 and fixes recording with the current Spotify web player.
 
-## ❯ Downloads
+## ❯ Installation
 
-The extension is available from both the Chrome Web Store and the Microsoft
-Edge-Add-Ons:
+The extension is not in the Chrome Web Store, it is installed from a release:
 
-<p align="center">
-    <a href="https://chrome.google.com/webstore/detail/clipinc%C2%AE/oppggbgnmeainpanihcbcdniomfobmec" target="_blank">
-        <img
-            src="./readme-assets/chrome-web-store.png"
-            alt="Available in the Chrome Web Store"
-            height="48"
-        />
-    </a>
-    <a href="https://microsoftedge.microsoft.com/addons/detail/clipinc%C2%AE/chioloodckidjhigkknplmlelmcghmfm" target="_blank">
-        <img
-            src="./readme-assets/microsoft-store.png"
-            alt="Get it from Microsoft"
-            height="48"
-        />
-    </a>
-</p>
+1. Download `clipinc-vX.Y.Z.zip` from the
+   [latest release](https://github.com/madex/clipinc/releases/latest)
+2. Unpack the zip into a folder you keep (Chrome loads the extension from there,
+   do not delete it)
+3. Open `chrome://extensions` (or `edge://extensions`)
+4. Activate the **developer mode** (toggle in the top right corner)
+5. Click **Load unpacked** and select the unpacked folder
+6. Reload open Spotify tabs
+
+**Update:** unpack the new release into the same folder (replace the old files)
+and click the reload icon of clipinc in `chrome://extensions`.
+
+## ❯ Usage
+
+1. Open the [Spotify web player](https://open.spotify.com) and start a playlist
+   or album
+2. Click the clipinc icon and switch the recording on
+3. The current song starts from the beginning, every song that has been played
+   to the end is saved to `Downloads/clipinc/<playlist or album>/`
+
+The tab is muted while recording. Skipped songs are discarded, pauses are not
+recorded. Playback has to run on this device (not via Spotify Connect).
 
 ## ❯ Local Development
 

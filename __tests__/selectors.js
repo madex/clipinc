@@ -8,8 +8,10 @@ const {
 const ChromeLauncher = require('chrome-launcher');
 const puppeteer = require('puppeteer');
 
-const USERNAME = 'babawo9543@donmah.com';
-const PASSWORD = 'passwort123';
+// credentials of a Spotify test account, e.g.
+// SPOTIFY_USERNAME=... SPOTIFY_PASSWORD=... npm test
+const USERNAME = process.env.SPOTIFY_USERNAME;
+const PASSWORD = process.env.SPOTIFY_PASSWORD;
 const ALBUM_URL = 'https://open.spotify.com/album/7gsWAHLeT0w7es6FofOXk1';
 
 let browser;

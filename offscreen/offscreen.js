@@ -1,6 +1,5 @@
 import { Recorder } from '../background-page/recorder';
 
-let audioCtx = null;
 let mediaRecorder = null;
 let stream = null;
 // tracks handed to a worker for encoding that have not been downloaded yet,
@@ -101,24 +100,7 @@ async function handleStartCapture({ streamId }) {
         },
     });
 
-    audioCtx = new AudioContext();
-    // a suspended context never calls onaudioprocess, the recording would stay empty
-    // (resume() stays pending forever if autoplay is not allowed, hence the timeout)
-    if (audioCtx.state !== 'running') {
-        await Promise.race([
-            audioCtx.resume(),
-            new Promise((resolve) => setTimeout(resolve, 1000)),
-        ]);
-    }
-    console.debug('Offscreen: AudioContext state', audioCtx.state);
-    if (audioCtx.state !== 'running') {
-        throw new Error(`AudioContext is ${audioCtx.state}`);
-    }
-
-    await Recorder.load(audioCtx);
-    const source = audioCtx.createMediaStreamSource(stream);
-
-    mediaRecorder = new Recorder(source);
+    mediaRecorder = new Recorder(stream.getAudioTracks()[0]);
     mediaRecorder.onComplete = handleRecordingComplete;
     mediaRecorder.onError = handleRecordingError;
 
@@ -131,18 +113,13 @@ function handleStopCapture() {
     if (mediaRecorder) {
         // tracks already handed to a worker keep their own callbacks and still
         // get downloaded, only the unfinished track is discarded
-        mediaRecorder.cancelRecording();
-        mediaRecorder.worker.terminate();
-    }
-    if (audioCtx) {
-        audioCtx.close();
+        mediaRecorder.stop();
     }
     if (stream) {
         stream.getAudioTracks().forEach((t) => t.stop());
         stream.getTracks().forEach((t) => t.stop());
     }
 
-    audioCtx = null;
     mediaRecorder = null;
     stream = null;
 }

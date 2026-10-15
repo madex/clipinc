@@ -9,13 +9,7 @@ let sampleRate = 44100,
     options = undefined,
     encoder = undefined,
     recBuffers = undefined,
-    bufferCount = 0,
-    // samples arrive from the AudioWorklet through this port
-    samplePort = undefined,
-    // set when the worklet sent its last batch
-    samplesEnded = false,
-    // a finish that waits for the last batch of the worklet
-    pendingTrack = undefined;
+    bufferCount = 0;
 
 function error(message) {
     console.debug('error');
@@ -32,39 +26,9 @@ function init(data) {
     }
 }
 
-function start(port) {
+function start() {
     console.debug('start');
     recBuffers = [];
-    samplesEnded = false;
-    pendingTrack = undefined;
-
-    samplePort = port;
-    samplePort.onmessage = ({ data }) => {
-        switch (data.command) {
-            case 'record':
-                record(data.buffer);
-                break;
-            case 'end':
-                samplesEnded = true;
-                closeSamplePort();
-                if (pendingTrack) {
-                    const track = pendingTrack;
-                    pendingTrack = undefined;
-                    finish(track);
-                }
-                break;
-            default:
-                break;
-        }
-    };
-}
-
-function closeSamplePort() {
-    if (samplePort) {
-        samplePort.onmessage = null;
-        samplePort.close();
-        samplePort = undefined;
-    }
 }
 
 function record(buffer) {
@@ -83,23 +47,6 @@ function postProgress(progress) {
 }
 
 function finish(track) {
-    if (samplePort && !samplesEnded) {
-        // the last batch of the worklet is still on its way,
-        // do not wait forever if the worklet is gone
-        pendingTrack = track;
-        setTimeout(() => {
-            if (pendingTrack === track) {
-                console.warn(
-                    'Mp3Worker: no end from worklet, finishing anyway',
-                );
-                pendingTrack = undefined;
-                closeSamplePort();
-                finish(track);
-            }
-        }, 2000);
-        return;
-    }
-
     console.debug('finish', recBuffers);
 
     if (!recBuffers || recBuffers.length === 0) {
@@ -234,7 +181,6 @@ function fetchFirstCover(urls) {
 
 function cleanup() {
     console.debug('cleanup');
-    closeSamplePort();
     encoder = recBuffers = undefined;
     bufferCount = 0;
 }
@@ -246,7 +192,10 @@ self.onmessage = function (event) {
             init(data);
             break;
         case 'start':
-            start(data.port);
+            start();
+            break;
+        case 'record':
+            record(data.buffer);
             break;
         case 'finish':
             finish(data.track);

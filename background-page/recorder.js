@@ -1,35 +1,91 @@
-const OPTIONS = {
-    numChannels: 2,
-};
+const NUM_CH = 2;
 
 // Spotify delivers loud masters close to 0 dBFS, MP3 encoding then overshoots
 // above full scale and players clip it (audible as crackling in loud parts).
 // -1.5 dB of headroom keeps the decoded peaks below 1.0.
 const HEADROOM_GAIN = Math.pow(10, -1.5 / 20);
 
-// copied next to the offscreen document by webpack, it must not be bundled
-// because worklets cannot load the core-js imports babel adds
-const WORKLET_URL = 'recorder-worklet.js';
+// AudioData frames (~10 ms each) the processor buffers while the main thread
+// of the offscreen document is busy, frames beyond that would be dropped
+const MAX_BUFFERED_FRAMES = 1000;
 
+// a timestamp jump larger than this between two frames is a gap in the audio
+const GAP_TOLERANCE_US = 2000;
+
+// Reads the samples of the captured track directly with a
+// MediaStreamTrackProcessor: no AudioContext, so no resampling and no second
+// clock that drifts against the capture clock (audible as crackling).
 export class Recorder {
-    // the worklet module has to be loaded once per AudioContext before
-    // the first recording starts
-    static async load(context) {
-        await context.audioWorklet.addModule(WORKLET_URL);
-    }
+    constructor(track) {
+        this.sampleRate = track.getSettings().sampleRate || 48000;
+        this.recording = false;
+        this.paused = false;
+        this.gaps = 0;
+        this.nextTimestamp = null;
 
-    constructor(source) {
-        this.context = source.context;
-
-        this.input = this.context.createGain();
-        this.input.gain.value = HEADROOM_GAIN;
-        source.connect(this.input);
+        // eslint-disable-next-line no-undef
+        const processor = new MediaStreamTrackProcessor({
+            track,
+            maxBufferSize: MAX_BUFFERED_FRAMES,
+        });
+        this.reader = processor.readable.getReader();
 
         this.initWorker();
+        this.readFrames();
+    }
+
+    async readFrames() {
+        for (;;) {
+            let result;
+            try {
+                result = await this.reader.read();
+            } catch (err) {
+                console.debug('Recorder: reading frames stopped', err);
+                return;
+            }
+            if (result.done) {
+                return;
+            }
+
+            const frame = result.value;
+            this.checkContinuity(frame);
+            if (this.recording && !this.paused) {
+                const buffer = toPlanar(frame);
+                this.worker.postMessage(
+                    { command: 'record', buffer },
+                    buffer.map((ch) => ch.buffer),
+                );
+            }
+            frame.close();
+        }
+    }
+
+    checkContinuity(frame) {
+        if (frame.sampleRate !== this.sampleRate) {
+            console.debug('Recorder: sample rate', frame.sampleRate);
+            this.sampleRate = frame.sampleRate;
+            this.postInit(this.worker);
+        }
+
+        if (
+            this.nextTimestamp !== null &&
+            Math.abs(frame.timestamp - this.nextTimestamp) > GAP_TOLERANCE_US
+        ) {
+            if (this.recording && !this.paused) {
+                this.gaps++;
+            }
+            console.warn(
+                'Recorder: gap in captured audio',
+                Math.round(frame.timestamp - this.nextTimestamp),
+                'µs',
+            );
+        }
+        this.nextTimestamp =
+            frame.timestamp + (frame.numberOfFrames / frame.sampleRate) * 1e6;
     }
 
     isRecording() {
-        return this.node != null;
+        return this.recording;
     }
 
     startRecording() {
@@ -37,47 +93,19 @@ export class Recorder {
             return;
         }
 
-        this.node = new AudioWorkletNode(this.context, 'clipinc-recorder', {
-            numberOfInputs: 1,
-            numberOfOutputs: 1,
-            outputChannelCount: [OPTIONS.numChannels],
-            channelCount: OPTIONS.numChannels,
-            channelCountMode: 'explicit',
-        });
-
-        // samples go from the audio thread straight to the worker,
-        // the port is handed over with 'start' so no sample arrives before it
-        const channel = new MessageChannel();
-        this.node.port.postMessage({ command: 'start', port: channel.port1 }, [
-            channel.port1,
-        ]);
-        this.worker.postMessage({ command: 'start', port: channel.port2 }, [
-            channel.port2,
-        ]);
-
-        this.input.connect(this.node);
-        // the node is only processed while it is connected to the destination,
-        // its output is silent
-        this.node.connect(this.context.destination);
+        this.recording = true;
+        this.paused = false;
+        this.gaps = 0;
+        this.worker.postMessage({ command: 'start' });
     }
 
     // stops feeding samples to the worker without discarding the track,
     // used while Spotify is paused so the pause is not recorded as silence
     pauseRecording() {
-        if (!this.isRecording() || this.paused) {
-            return;
-        }
-
-        this.input.disconnect();
         this.paused = true;
     }
 
     resumeRecording() {
-        if (!this.isRecording() || !this.paused) {
-            return;
-        }
-
-        this.input.connect(this.node);
         this.paused = false;
     }
 
@@ -86,7 +114,7 @@ export class Recorder {
             return;
         }
 
-        this.releaseNode('cancel');
+        this.recording = false;
         this.worker.postMessage({ command: 'cancel' });
     }
 
@@ -95,9 +123,8 @@ export class Recorder {
             return;
         }
 
-        // the worklet sends its last batch and an 'end' marker to the worker,
-        // the worker waits for it before encoding
-        this.releaseNode('flush');
+        this.recording = false;
+        console.debug('Recorder: finished track with', this.gaps, 'gaps');
 
         // Hand off the current worker for encoding — it will fire onComplete when done
         const oldWorker = this.worker;
@@ -129,21 +156,11 @@ export class Recorder {
         this.initWorker();
     }
 
-    // stops the worklet, the node stays connected (and alive) until the
-    // processor confirmed the command
-    releaseNode(command) {
-        const node = this.node;
-        this.input.disconnect();
-        node.port.onmessage = ({ data }) => {
-            if (data.command === 'stopped') {
-                node.disconnect();
-                node.port.close();
-            }
-        };
-        node.port.postMessage({ command });
-
-        delete this.node;
-        this.paused = false;
+    // stops reading the track, the worker of the unfinished track is terminated
+    stop() {
+        this.cancelRecording();
+        this.reader.cancel();
+        this.worker.terminate();
     }
 
     initWorker() {
@@ -169,13 +186,16 @@ export class Recorder {
             }
         };
 
-        this.worker.postMessage({
+        this.postInit(this.worker);
+    }
+
+    postInit(worker) {
+        worker.postMessage({
             command: 'init',
             config: {
-                sampleRate: this.context.sampleRate,
-                numChannels: OPTIONS.numChannels,
+                sampleRate: this.sampleRate,
+                numChannels: NUM_CH,
             },
-            options: OPTIONS,
         });
     }
 
@@ -184,4 +204,26 @@ export class Recorder {
     onComplete(recorder, track, arrayBuffer) {}
 
     onError(recorder, error) {}
+}
+
+// copies an AudioData frame into one Float32Array per channel (mono is
+// duplicated) and applies the headroom gain
+function toPlanar(frame) {
+    const buffer = [];
+    for (let ch = 0; ch < NUM_CH; ++ch) {
+        const plane = new Float32Array(frame.numberOfFrames);
+        const options = {
+            planeIndex: Math.min(ch, frame.numberOfChannels - 1),
+        };
+        // tab audio usually arrives as f32-planar, convert only if needed
+        if (frame.format !== 'f32-planar') {
+            options.format = 'f32-planar';
+        }
+        frame.copyTo(plane, options);
+        for (let i = 0; i < plane.length; ++i) {
+            plane[i] *= HEADROOM_GAIN;
+        }
+        buffer.push(plane);
+    }
+    return buffer;
 }

@@ -9,7 +9,13 @@ let sampleRate = 44100,
     options = undefined,
     encoder = undefined,
     recBuffers = undefined,
-    bufferCount = 0;
+    bufferCount = 0,
+    // samples arrive from the AudioWorklet through this port
+    samplePort = undefined,
+    // set when the worklet sent its last batch
+    samplesEnded = false,
+    // a finish that waits for the last batch of the worklet
+    pendingTrack = undefined;
 
 function error(message) {
     console.debug('error');
@@ -26,9 +32,39 @@ function init(data) {
     }
 }
 
-function start() {
-    console.debug('start', []);
+function start(port) {
+    console.debug('start');
     recBuffers = [];
+    samplesEnded = false;
+    pendingTrack = undefined;
+
+    samplePort = port;
+    samplePort.onmessage = ({ data }) => {
+        switch (data.command) {
+            case 'record':
+                record(data.buffer);
+                break;
+            case 'end':
+                samplesEnded = true;
+                closeSamplePort();
+                if (pendingTrack) {
+                    const track = pendingTrack;
+                    pendingTrack = undefined;
+                    finish(track);
+                }
+                break;
+            default:
+                break;
+        }
+    };
+}
+
+function closeSamplePort() {
+    if (samplePort) {
+        samplePort.onmessage = null;
+        samplePort.close();
+        samplePort = undefined;
+    }
 }
 
 function record(buffer) {
@@ -47,6 +83,23 @@ function postProgress(progress) {
 }
 
 function finish(track) {
+    if (samplePort && !samplesEnded) {
+        // the last batch of the worklet is still on its way,
+        // do not wait forever if the worklet is gone
+        pendingTrack = track;
+        setTimeout(() => {
+            if (pendingTrack === track) {
+                console.warn(
+                    'Mp3Worker: no end from worklet, finishing anyway',
+                );
+                pendingTrack = undefined;
+                closeSamplePort();
+                finish(track);
+            }
+        }, 2000);
+        return;
+    }
+
     console.debug('finish', recBuffers);
 
     if (!recBuffers || recBuffers.length === 0) {
@@ -78,28 +131,15 @@ function finish(track) {
         fileReader.readAsArrayBuffer(blob);
     });
 
-    // Cover fetch is optional - if it fails, we still produce the MP3 without cover art
-    let imagePromise;
-    if (track.cover && track.cover.length > 0) {
-        imagePromise = fetch(track.cover)
-            .then((res) => {
-                if (!res.ok)
-                    throw new Error(`Cover fetch returned ${res.status}`);
-                return res.arrayBuffer().then((arrayBuffer) => ({
-                    arrayBuffer,
-                    mimeType: res.headers.get('Content-Type') || 'image/jpeg',
-                }));
-            })
-            .catch((err) => {
-                console.warn(
-                    'Mp3Worker: cover fetch failed, proceeding without cover:',
-                    err.message,
-                );
-                return null;
-            });
-    } else {
-        imagePromise = Promise.resolve(null);
-    }
+    // Cover is optional - if no URL works, the MP3 is produced without cover art
+    const coverUrls = [track.cover, track.coverFallback].filter(Boolean);
+    const imagePromise = fetchFirstCover(coverUrls).catch((err) => {
+        console.warn(
+            'Mp3Worker: cover fetch failed, proceeding without cover:',
+            err.message,
+        );
+        return null;
+    });
 
     Promise.all([filePromise, imagePromise])
         .then(([file, cover]) => {
@@ -172,8 +212,29 @@ function finish(track) {
         });
 }
 
+// tries the urls in order, the first one that loads wins
+function fetchFirstCover(urls) {
+    return urls.reduce(
+        (previous, url) =>
+            previous.catch(() =>
+                fetch(url).then((res) => {
+                    if (!res.ok) {
+                        throw new Error(`Cover fetch returned ${res.status}`);
+                    }
+                    return res.arrayBuffer().then((arrayBuffer) => ({
+                        arrayBuffer,
+                        mimeType:
+                            res.headers.get('Content-Type') || 'image/jpeg',
+                    }));
+                }),
+            ),
+        Promise.reject(new Error('no cover url')),
+    );
+}
+
 function cleanup() {
     console.debug('cleanup');
+    closeSamplePort();
     encoder = recBuffers = undefined;
     bufferCount = 0;
 }
@@ -185,10 +246,7 @@ self.onmessage = function (event) {
             init(data);
             break;
         case 'start':
-            start();
-            break;
-        case 'record':
-            record(data.buffer);
+            start(data.port);
             break;
         case 'finish':
             finish(data.track);

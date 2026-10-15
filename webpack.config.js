@@ -100,6 +100,11 @@ module.exports = [
                             from: './background-page/encoders/*',
                             to: './encoders/[name][ext]',
                         },
+                        // loaded via audioWorklet.addModule, must stay unbundled
+                        {
+                            from: './background-page/recorder-worklet.js',
+                            to: '.',
+                        },
                     ],
                 }),
             ],

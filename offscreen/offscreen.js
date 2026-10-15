@@ -115,6 +115,7 @@ async function handleStartCapture({ streamId }) {
         throw new Error(`AudioContext is ${audioCtx.state}`);
     }
 
+    await Recorder.load(audioCtx);
     const source = audioCtx.createMediaStreamSource(stream);
 
     mediaRecorder = new Recorder(source);

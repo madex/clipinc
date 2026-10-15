@@ -1,15 +1,20 @@
 const OPTIONS = {
     numChannels: 2,
-    bufferSize: undefined,
 };
 
+// copied next to the offscreen document by webpack, it must not be bundled
+// because worklets cannot load the core-js imports babel adds
+const WORKLET_URL = 'recorder-worklet.js';
+
 export class Recorder {
+    // the worklet module has to be loaded once per AudioContext before
+    // the first recording starts
+    static async load(context) {
+        await context.audioWorklet.addModule(WORKLET_URL);
+    }
+
     constructor(source) {
         this.context = source.context;
-        if (this.context.createScriptProcessor == null) {
-            this.context.createScriptProcessor =
-                this.context.createJavaScriptNode;
-        }
 
         this.input = this.context.createGain();
         source.connect(this.input);
@@ -18,7 +23,7 @@ export class Recorder {
     }
 
     isRecording() {
-        return this.processor != null;
+        return this.node != null;
     }
 
     startRecording() {
@@ -26,27 +31,28 @@ export class Recorder {
             return;
         }
 
-        const buffer = [];
-        const worker = this.worker;
-
-        this.processor = this.context.createScriptProcessor(
-            OPTIONS.bufferSize,
-            OPTIONS.numChannels,
-            OPTIONS.numChannels,
-        );
-        this.input.connect(this.processor);
-        this.processor.connect(this.context.destination);
-
-        this.processor.onaudioprocess = (event) => {
-            for (let ch = 0; ch < OPTIONS.numChannels; ++ch) {
-                buffer[ch] = event.inputBuffer.getChannelData(ch);
-            }
-            worker.postMessage({ command: 'record', buffer: buffer });
-        };
-
-        this.worker.postMessage({
-            command: 'start',
+        this.node = new AudioWorkletNode(this.context, 'clipinc-recorder', {
+            numberOfInputs: 1,
+            numberOfOutputs: 1,
+            outputChannelCount: [OPTIONS.numChannels],
+            channelCount: OPTIONS.numChannels,
+            channelCountMode: 'explicit',
         });
+
+        // samples go from the audio thread straight to the worker,
+        // the port is handed over with 'start' so no sample arrives before it
+        const channel = new MessageChannel();
+        this.node.port.postMessage({ command: 'start', port: channel.port1 }, [
+            channel.port1,
+        ]);
+        this.worker.postMessage({ command: 'start', port: channel.port2 }, [
+            channel.port2,
+        ]);
+
+        this.input.connect(this.node);
+        // the node is only processed while it is connected to the destination,
+        // its output is silent
+        this.node.connect(this.context.destination);
     }
 
     // stops feeding samples to the worker without discarding the track,
@@ -65,7 +71,7 @@ export class Recorder {
             return;
         }
 
-        this.input.connect(this.processor);
+        this.input.connect(this.node);
         this.paused = false;
     }
 
@@ -74,10 +80,7 @@ export class Recorder {
             return;
         }
 
-        this.input.disconnect();
-        this.processor.disconnect();
-        delete this.processor;
-        this.paused = false;
+        this.releaseNode('cancel');
         this.worker.postMessage({ command: 'cancel' });
     }
 
@@ -86,13 +89,9 @@ export class Recorder {
             return;
         }
 
-        // Disconnect processor from the audio graph
-        // input.disconnect() only removes outgoing connections (input→processor),
-        // the incoming connection (source→input) is unaffected
-        this.processor.disconnect();
-        this.input.disconnect();
-        delete this.processor;
-        this.paused = false;
+        // the worklet sends its last batch and an 'end' marker to the worker,
+        // the worker waits for it before encoding
+        this.releaseNode('flush');
 
         // Hand off the current worker for encoding — it will fire onComplete when done
         const oldWorker = this.worker;
@@ -113,6 +112,8 @@ export class Recorder {
                     onError(this, data.message);
                     oldWorker.terminate();
                     break;
+                default:
+                    break;
             }
         };
         oldWorker.postMessage({ command: 'finish', track });
@@ -120,6 +121,23 @@ export class Recorder {
         // Create a fresh worker immediately so startRecording() has a clean slate
         this.worker = null; // prevent initWorker from terminating the old one
         this.initWorker();
+    }
+
+    // stops the worklet, the node stays connected (and alive) until the
+    // processor confirmed the command
+    releaseNode(command) {
+        const node = this.node;
+        this.input.disconnect();
+        node.port.onmessage = ({ data }) => {
+            if (data.command === 'stopped') {
+                node.disconnect();
+                node.port.close();
+            }
+        };
+        node.port.postMessage({ command });
+
+        delete this.node;
+        this.paused = false;
     }
 
     initWorker() {
@@ -139,6 +157,8 @@ export class Recorder {
                     break;
                 case 'error':
                     this.onError(this, data.message);
+                    break;
+                default:
                     break;
             }
         };

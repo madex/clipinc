@@ -409,19 +409,31 @@ function getLocalTrackInfo() {
     const title = titleEl?.textContent || 'Unknown Title';
     const artist = artistEl?.textContent || 'Unknown Artist';
     const duration = durationEl?.textContent || '0:00';
-    const cover = coverEl?.src || '';
+    const coverFallback = coverEl?.src || '';
+    const cover = getLargeCoverUrl(coverFallback);
 
     return {
         artist,
         title,
         duration: durationToMs(duration),
         cover,
+        coverFallback,
         isPremium,
         kbps: isPremium ? 256 : 128,
         directory: directoryName !== '' ? directoryName : undefined,
         progress: 0,
         startTime: Date.now(),
     };
+}
+
+// The player bar shows a 64px cover. Spotify's CDN encodes the size in the
+// image id (album covers: ab67616d + 00004851 = 64px, 00001e02 = 300px,
+// 0000b273 = 640px), the large one is what the now playing view shows.
+function getLargeCoverUrl(url) {
+    return url.replace(
+        /(\/image\/ab67616d)(00004851|00001e02)/,
+        (match, prefix) => `${prefix}0000b273`,
+    );
 }
 
 // parses duration to ms

@@ -409,15 +409,17 @@ function getLocalTrackInfo() {
     const title = titleEl?.textContent || 'Unknown Title';
     const artist = artistEl?.textContent || 'Unknown Artist';
     const duration = durationEl?.textContent || '0:00';
-    const coverFallback = coverEl?.src || '';
-    const cover = getLargeCoverUrl(coverFallback);
+    const coverSrc = coverEl?.src || '';
+    const coverUrls = getCoverUrls(coverSrc);
+    // the popup shows the 640px variant, it exists for every album
+    const cover = coverUrls.length === 3 ? coverUrls[1] : coverSrc;
 
     return {
         artist,
         title,
         duration: durationToMs(duration),
         cover,
-        coverFallback,
+        coverUrls,
         isPremium,
         kbps: isPremium ? 256 : 128,
         directory: directoryName !== '' ? directoryName : undefined,
@@ -426,14 +428,18 @@ function getLocalTrackInfo() {
     };
 }
 
-// The player bar shows a 64px cover. Spotify's CDN encodes the size in the
-// image id (album covers: ab67616d + 00004851 = 64px, 00001e02 = 300px,
-// 0000b273 = 640px), the large one is what the now playing view shows.
-function getLargeCoverUrl(url) {
-    return url.replace(
-        /(\/image\/ab67616d)(00004851|00001e02)/,
-        (match, prefix) => `${prefix}0000b273`,
-    );
+// The player bar shows a 64px cover, the now playing view 300px. Spotify's
+// CDN encodes the size in the image id (album covers: ab67616d + 00004851 =
+// 64px, 00001e02 = 300px, 0000b273 = 640px, 000082c1 = original size).
+// Returns the urls from best to worst, the worker uses the first that loads.
+function getCoverUrls(src) {
+    const match = src.match(/^(.*\/image\/ab67616d)(00004851|00001e02)(.*)$/);
+    if (!match) {
+        return src ? [src] : [];
+    }
+
+    const [, prefix, , id] = match;
+    return [`${prefix}000082c1${id}`, `${prefix}0000b273${id}`, src];
 }
 
 // parses duration to ms

@@ -132,7 +132,7 @@ function finish(track) {
     });
 
     // Cover is optional - if no URL works, the MP3 is produced without cover art
-    const coverUrls = [track.cover, track.coverFallback].filter(Boolean);
+    const coverUrls = track.coverUrls || [track.cover].filter(Boolean);
     const imagePromise = fetchFirstCover(coverUrls).catch((err) => {
         console.warn(
             'Mp3Worker: cover fetch failed, proceeding without cover:',

@@ -135,15 +135,14 @@ async function handleRecordingComplete(recorder, track, arrayBuffer) {
     );
 
     // Build filename
-    const regex = /[^a-zA-Z0-9]/g;
     let filename = 'clipinc';
 
     if (track.directory) {
-        filename = `${filename}/${track.directory.replace(regex, ' ').trim()}`;
+        filename = `${filename}/${toFilenamePart(track.directory)}`;
     }
 
-    const title = track.title ? track.title.replace(regex, ' ').trim() : '';
-    const artist = track.artist ? track.artist.replace(regex, ' ').trim() : '';
+    const title = toFilenamePart(track.title);
+    const artist = toFilenamePart(track.artist);
 
     filename = `${filename}/${artist} - ${title}.mp3`;
     console.debug(
@@ -161,6 +160,20 @@ async function handleRecordingComplete(recorder, track, arrayBuffer) {
         command: 'offscreen:downloadComplete',
         data: { track, filename, dataUrl, pendingEncodings },
     });
+}
+
+// Keeps letters and digits of every language (ä, ö, ü, ß, é, ...) and harmless
+// punctuation, everything else (path separators, characters Windows or
+// chrome.downloads reject) becomes a space.
+function toFilenamePart(value) {
+    return (value || '')
+        .normalize('NFC')
+        .replace(/[^\p{L}\p{M}\p{N} \-_.,;'()&!+#]/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/^\.+|\.+$/g, '')
+        .slice(0, 120)
+        .trim();
 }
 
 function handleRecordingError(recorder, message) {

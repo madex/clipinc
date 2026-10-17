@@ -6,6 +6,8 @@ window.__clipincLoaded = true;
 // after the play event, so it is a metadata update and not a new track
 const TRACK_SETTLE_MS = 3000;
 const POLL_INTERVAL_MS = 1000;
+// an abort this close to the end of a track is its end, not a skip
+const END_TOLERANCE_MS = 5000;
 
 let trackTimeout;
 let pollingInterval = null;
@@ -18,6 +20,8 @@ let lastTrackInfo = null; // info of the track being recorded
 let playingWithoutTrack = 0; // polls that saw playback without an open track
 // a cancelled (skipped) track must not be restarted by polling as a fragment
 let cancelledTrackKey = null;
+// playback position of the open track, updated by polling
+let lastPositionMs = 0;
 
 // ---- Media events (dispatched by inject.js in the MAIN world) ----
 
@@ -53,9 +57,16 @@ document.addEventListener('clipinc:ended', () => {
     }
 });
 
-// abort is dispatched when the user skips a track, the partial track is discarded
+// abort is dispatched when the user skips a track, the partial track is
+// discarded. Spotify also dispatches it instead of ended at the end of a track.
 document.addEventListener('clipinc:abort', () => {
-    if (sessionActive && trackOpen) {
+    if (!sessionActive || !trackOpen) return;
+
+    const duration = lastTrackInfo?.duration || 0;
+    if (duration > 0 && lastPositionMs >= duration - END_TOLERANCE_MS) {
+        console.debug('clipinc: abort at the end of the track');
+        finishTrack();
+    } else {
         cancelTrack();
     }
 });
@@ -74,6 +85,7 @@ function startTrack(key) {
     trackOpen = true;
     currentTrackKey = key;
     trackStartedAt = Date.now();
+    lastPositionMs = 0;
     lastTrackInfo = getLocalTrackInfo();
     console.debug('clipinc: start track', key);
 
@@ -182,7 +194,10 @@ function pollSpotifyState() {
     }
     playingWithoutTrack = 0;
 
-    if (key === currentTrackKey) return;
+    if (key === currentTrackKey) {
+        lastPositionMs = getPlaybackPosition();
+        return;
+    }
 
     if (Date.now() - trackStartedAt < TRACK_SETTLE_MS) {
         // the play event came before Spotify updated the DOM
@@ -193,6 +208,11 @@ function pollSpotifyState() {
         finishTrack();
         startTrack(key);
     }
+}
+
+function getPlaybackPosition() {
+    const el = document.querySelector('[data-testid="playback-position"]');
+    return el ? durationToMs(el.textContent) || 0 : 0;
 }
 
 function getTrackKey() {
@@ -304,9 +324,24 @@ async function getTrackInfo() {
             track.albumArtist = album.albumArtist;
             track.albumReleaseYear = album.albumReleaseYear;
 
-            const index = album.trackUris.indexOf(`spotify:track:${trackId}`);
+            // the playing track can have another id than the album's track
+            // (relinked regional version), then the title is compared
+            let index = album.trackUris.indexOf(`spotify:track:${trackId}`);
+            if (index < 0) {
+                const title = track.title.toLowerCase();
+                index = album.trackTitles.findIndex(
+                    (t) => t.toLowerCase() === title,
+                );
+            }
             if (index >= 0) {
                 track.trackNumber = String(index + 1);
+            } else {
+                console.debug('clipinc: track not in album list', {
+                    trackId,
+                    albumId,
+                    title: track.title,
+                    tracks: album.trackUris.length,
+                });
             }
         }
 
@@ -360,6 +395,7 @@ function fetchAlbumMeta(albumId) {
             albumArtist: entity?.subtitle || undefined,
             albumReleaseYear: getReleaseYear(entity),
             trackUris: (entity?.trackList || []).map((t) => t.uri),
+            trackTitles: (entity?.trackList || []).map((t) => t.title || ''),
         }));
         // a failed request is retried with the next track
         promise.catch(() => albumCache.delete(albumId));
@@ -456,8 +492,12 @@ function getCoverUrls(src) {
 
 // parses duration to ms
 function durationToMs(duration) {
-    const times = duration.split(':');
-    return (parseInt(times[0], 10) * 60 + parseInt(times[1], 10)) * 1000;
+    // "m:ss" or "h:mm:ss"
+    const seconds = duration
+        .trim()
+        .split(':')
+        .reduce((acc, part) => acc * 60 + parseInt(part, 10), 0);
+    return seconds * 1000;
 }
 
 // retrieves a field from the cookies

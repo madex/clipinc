@@ -16,6 +16,8 @@ let trackStartedAt = 0;
 let trackSeq = 0; // invalidates late track info responses of previous tracks
 let lastTrackInfo = null; // info of the track being recorded
 let playingWithoutTrack = 0; // polls that saw playback without an open track
+// a cancelled (skipped) track must not be restarted by polling as a fragment
+let cancelledTrackKey = null;
 
 // ---- Media events (dispatched by inject.js in the MAIN world) ----
 
@@ -23,6 +25,7 @@ document.addEventListener('clipinc:play', () => {
     if (!sessionActive) return;
 
     const key = getTrackKey();
+    cancelledTrackKey = null;
     if (!trackOpen) {
         startTrack(key);
     } else if (
@@ -67,7 +70,7 @@ document.addEventListener('clipinc:initplayer', () => {
 // ---- Track lifecycle ----
 
 function startTrack(key) {
-    const seq = ++trackSeq;
+    trackSeq++;
     trackOpen = true;
     currentTrackKey = key;
     trackStartedAt = Date.now();
@@ -80,12 +83,16 @@ function startTrack(key) {
     });
 
     clearTimeout(trackTimeout);
-    trackTimeout = setTimeout(() => {
-        getTrackInfo().then((track) => {
-            if (seq !== trackSeq) return;
-            updateTrackInfo(track);
-        });
-    }, 1000);
+    trackTimeout = setTimeout(refreshTrackInfo, 1000);
+}
+
+// reads the track info again, late answers for a previous track are ignored
+function refreshTrackInfo() {
+    const seq = trackSeq;
+    getTrackInfo().then((track) => {
+        if (seq !== trackSeq) return;
+        updateTrackInfo(track);
+    });
 }
 
 function updateTrackInfo(track) {
@@ -111,6 +118,7 @@ function finishTrack() {
 
 function cancelTrack() {
     console.debug('clipinc: cancel track', currentTrackKey);
+    cancelledTrackKey = currentTrackKey;
     clearTimeout(trackTimeout);
     trackSeq++;
     trackOpen = false;
@@ -159,6 +167,11 @@ function pollSpotifyState() {
     if (!key) return;
 
     if (!trackOpen) {
+        // the rest of a cancelled track would only be a fragment
+        if (key === cancelledTrackKey) {
+            playingWithoutTrack = 0;
+            return;
+        }
         // a play event normally opens the track immediately,
         // wait for a second poll before falling back
         if (++playingWithoutTrack >= 2) {
@@ -172,8 +185,9 @@ function pollSpotifyState() {
     if (key === currentTrackKey) return;
 
     if (Date.now() - trackStartedAt < TRACK_SETTLE_MS) {
+        // the play event came before Spotify updated the DOM
         currentTrackKey = key;
-        updateTrackInfo(getLocalTrackInfo());
+        refreshTrackInfo();
     } else {
         console.debug('clipinc: track change detected by polling');
         finishTrack();

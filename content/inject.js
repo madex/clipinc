@@ -9,10 +9,21 @@
     window.__clipincInjected = true;
 
     const EVENTS = ['play', 'pause', 'ended', 'abort', 'seeking'];
-    const hooked = new WeakSet();
+    const hooked = new Set();
     let targetVolume = null;
+    // Spotify uses more than one media element (one preloads the next track),
+    // only the events of the element that played last belong to the recording
+    let active = null;
 
     function dispatchToDocument(event) {
+        if (event.type === 'play') {
+            active = event.target;
+            window._svp = active;
+        }
+        if (event.target !== active) {
+            return;
+        }
+
         // the media element dispatches pause before ended when a track ends,
         // drop that pause so the track can be finished instead of paused
         if (event.target.ended && event.type !== 'ended') {
@@ -27,7 +38,10 @@
             return;
         }
         hooked.add(element);
-        window._svp = element;
+        if (!element.paused) {
+            active = element;
+            window._svp = element;
+        }
 
         EVENTS.forEach((type) =>
             element.addEventListener(type, dispatchToDocument),
@@ -74,8 +88,8 @@
     document.addEventListener('clipinc:setvolume', (event) => {
         const { volume, lock } = JSON.parse(event.detail);
         targetVolume = lock ? volume : null;
-        if (window._svp) {
-            window._svp.volume = volume;
-        }
+        hooked.forEach((element) => {
+            element.volume = volume;
+        });
     });
 })();

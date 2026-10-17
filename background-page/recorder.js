@@ -12,6 +12,11 @@ const MAX_BUFFERED_FRAMES = 1000;
 // a timestamp jump larger than this between two frames is a gap in the audio
 const GAP_TOLERANCE_US = 2000;
 
+// Chrome delivers no frames while the tab outputs no audio (buffering, next
+// track loading). Gaps up to this length during a recording are filled with
+// silence so the track keeps its length, longer ones are left out.
+const MAX_GAP_FILL_US = 1000000;
+
 // Reads the samples of the captured track directly with a
 // MediaStreamTrackProcessor: no AudioContext, so no resampling and no second
 // clock that drifts against the capture clock (audible as crackling).
@@ -21,6 +26,7 @@ export class Recorder {
         this.recording = false;
         this.paused = false;
         this.gaps = 0;
+        this.gapMs = 0;
         this.nextTimestamp = null;
 
         // eslint-disable-next-line no-undef
@@ -48,8 +54,11 @@ export class Recorder {
             }
 
             const frame = result.value;
-            this.checkContinuity(frame);
+            const gapUs = this.checkContinuity(frame);
             if (this.recording && !this.paused) {
+                if (gapUs > 0) {
+                    this.recordGap(gapUs, frame.sampleRate);
+                }
                 const buffer = toPlanar(frame);
                 this.worker.postMessage(
                     { command: 'record', buffer },
@@ -60,6 +69,7 @@ export class Recorder {
         }
     }
 
+    // returns the length of the gap before this frame in µs, 0 if there is none
     checkContinuity(frame) {
         if (frame.sampleRate !== this.sampleRate) {
             console.debug('Recorder: sample rate', frame.sampleRate);
@@ -67,21 +77,39 @@ export class Recorder {
             this.postInit(this.worker);
         }
 
-        if (
-            this.nextTimestamp !== null &&
-            Math.abs(frame.timestamp - this.nextTimestamp) > GAP_TOLERANCE_US
-        ) {
-            if (this.recording && !this.paused) {
-                this.gaps++;
+        let gapUs = 0;
+        if (this.nextTimestamp !== null) {
+            const diff = frame.timestamp - this.nextTimestamp;
+            if (diff > GAP_TOLERANCE_US) {
+                gapUs = diff;
+                console.debug(
+                    'Recorder: no audio for',
+                    Math.round(diff / 1000),
+                    'ms',
+                );
             }
-            console.warn(
-                'Recorder: gap in captured audio',
-                Math.round(frame.timestamp - this.nextTimestamp),
-                'µs',
-            );
         }
         this.nextTimestamp =
             frame.timestamp + (frame.numberOfFrames / frame.sampleRate) * 1e6;
+        return gapUs;
+    }
+
+    recordGap(gapUs, sampleRate) {
+        this.gaps++;
+        this.gapMs += Math.round(gapUs / 1000);
+        if (gapUs > MAX_GAP_FILL_US) {
+            return;
+        }
+
+        const length = Math.round((gapUs / 1e6) * sampleRate);
+        const buffer = [];
+        for (let ch = 0; ch < NUM_CH; ++ch) {
+            buffer.push(new Float32Array(length));
+        }
+        this.worker.postMessage(
+            { command: 'record', buffer },
+            buffer.map((ch) => ch.buffer),
+        );
     }
 
     isRecording() {
@@ -96,6 +124,8 @@ export class Recorder {
         this.recording = true;
         this.paused = false;
         this.gaps = 0;
+        this.gapMs = 0;
+        this.nextTimestamp = null;
         this.worker.postMessage({ command: 'start' });
     }
 
@@ -107,6 +137,8 @@ export class Recorder {
 
     resumeRecording() {
         this.paused = false;
+        // the pause itself is not a gap
+        this.nextTimestamp = null;
     }
 
     cancelRecording() {
@@ -124,7 +156,15 @@ export class Recorder {
         }
 
         this.recording = false;
-        console.debug('Recorder: finished track with', this.gaps, 'gaps');
+        if (this.gaps > 0) {
+            console.warn(
+                `Recorder: "${track?.title}" had ${
+                    this.gaps
+                } gaps without audio (${this.gapMs} ms), gaps up to ${
+                    MAX_GAP_FILL_US / 1000
+                } ms were filled with silence`,
+            );
+        }
 
         // Hand off the current worker for encoding — it will fire onComplete when done
         const oldWorker = this.worker;

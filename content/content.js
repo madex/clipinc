@@ -290,25 +290,35 @@ function isTrackInPlayList() {
     return Boolean(playlist);
 }
 
-// Track info from the DOM, completed with album, release year and track
-// number from Spotify's public track and album pages. The Web API is not
-// usable anymore (get_access_token answers 403).
+// Track info from the DOM, completed with album, album artist, track number
+// and release year from Spotify's embed pages (the regular pages carry no
+// meta tags for browsers, the Web API answers 403).
 async function getTrackInfo() {
     const track = getLocalTrackInfo();
     const { trackId, albumId } = getCurrentIds();
 
     try {
-        const [trackMeta, albumMeta] = await Promise.all([
-            trackId ? fetchPageMeta(`/track/${trackId}`) : null,
-            albumId ? fetchAlbumMeta(albumId) : null,
-        ]);
+        if (albumId) {
+            const album = await fetchAlbumMeta(albumId);
+            track.album = album.album;
+            track.albumArtist = album.albumArtist;
+            track.albumReleaseYear = album.albumReleaseYear;
 
-        if (trackMeta) {
-            const trackNumber = trackMeta['music:album:track'];
-            if (trackNumber) track.trackNumber = trackNumber;
+            const index = album.trackUris.indexOf(`spotify:track:${trackId}`);
+            if (index >= 0) {
+                track.trackNumber = String(index + 1);
+            }
         }
-        if (albumMeta) {
-            Object.assign(track, albumMeta);
+
+        if (!track.albumReleaseYear && trackId) {
+            const entity = await fetchEmbedEntity('track', trackId);
+            track.albumReleaseYear = getReleaseYear(entity);
+            if (!track.albumReleaseYear) {
+                console.debug(
+                    'clipinc: no release year, track entity keys',
+                    Object.keys(entity || {}),
+                );
+            }
         }
     } catch (err) {
         console.warn('clipinc: could not read album info', err);
@@ -345,18 +355,12 @@ const albumCache = new Map();
 
 function fetchAlbumMeta(albumId) {
     if (!albumCache.has(albumId)) {
-        const promise = fetchPageMeta(`/album/${albumId}`).then((meta) => {
-            // music:release_date is "YYYY-MM-DD", og:description mentions
-            // the year as well ("<artist> · Album · <year> · <n> songs")
-            const year =
-                (meta['music:release_date'] || '').match(/^\d{4}/)?.[0] ||
-                (meta['og:description'] || '').match(/\b(19|20)\d{2}\b/)?.[0];
-            return {
-                album: meta['og:title'] || undefined,
-                albumArtist: meta['music:musician_description'] || undefined,
-                albumReleaseYear: parseInt(year, 10) || undefined,
-            };
-        });
+        const promise = fetchEmbedEntity('album', albumId).then((entity) => ({
+            album: entity?.name || undefined,
+            albumArtist: entity?.subtitle || undefined,
+            albumReleaseYear: getReleaseYear(entity),
+            trackUris: (entity?.trackList || []).map((t) => t.uri),
+        }));
         // a failed request is retried with the next track
         promise.catch(() => albumCache.delete(albumId));
         albumCache.set(albumId, promise);
@@ -364,20 +368,29 @@ function fetchAlbumMeta(albumId) {
     return albumCache.get(albumId);
 }
 
-// reads the <meta> tags (og:* and music:*) of a page on open.spotify.com
-async function fetchPageMeta(path) {
-    const res = await fetch(path, { credentials: 'omit' });
+// The embed page (open.spotify.com/embed/<type>/<id>) is rendered with
+// Next.js, its __NEXT_DATA__ script holds the entity as JSON.
+async function fetchEmbedEntity(type, id) {
+    const res = await fetch(`/embed/${type}/${id}`, { credentials: 'omit' });
     if (!res.ok) {
-        throw new Error(`${path} returned ${res.status}`);
+        throw new Error(`embed ${type} returned ${res.status}`);
     }
 
-    const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
-    const meta = {};
-    doc.querySelectorAll('meta[property], meta[name]').forEach((el) => {
-        const key = el.getAttribute('property') || el.getAttribute('name');
-        if (!(key in meta)) meta[key] = el.getAttribute('content');
-    });
-    return meta;
+    const html = await res.text();
+    const json = html.match(
+        /<script id="__NEXT_DATA__"[^>]*>(.*?)<\/script>/s,
+    )?.[1];
+    if (!json) {
+        throw new Error(`embed ${type} has no __NEXT_DATA__`);
+    }
+    return JSON.parse(json).props?.pageProps?.state?.data?.entity || null;
+}
+
+// releaseDate is either an ISO string or { isoString }, may be null
+function getReleaseYear(entity) {
+    const date = entity?.releaseDate;
+    const value = typeof date === 'string' ? date : date?.isoString;
+    return parseInt(String(value || '').substring(0, 4), 10) || undefined;
 }
 
 function getLocalTrackInfo() {

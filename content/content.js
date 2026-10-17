@@ -276,110 +276,95 @@ function isTrackInPlayList() {
     return Boolean(playlist);
 }
 
-// get track info from dom (with API fallback)
-const getTrackInfo = () =>
-    new Promise((resolve) => {
-        let directoryName = '';
-        const isPlaylistTrack = isTrackInPlayList();
+// Track info from the DOM, completed with album, release year and track
+// number from Spotify's public track and album pages. The Web API is not
+// usable anymore (get_access_token answers 403).
+async function getTrackInfo() {
+    const track = getLocalTrackInfo();
+    const { trackId, albumId } = getCurrentIds();
 
-        if (!isPlaylistTrack) {
-            directoryName = getAlbumName();
-        } else {
-            directoryName = getPlayListName();
+    try {
+        const [trackMeta, albumMeta] = await Promise.all([
+            trackId ? fetchPageMeta(`/track/${trackId}`) : null,
+            albumId ? fetchAlbumMeta(albumId) : null,
+        ]);
+
+        if (trackMeta) {
+            const trackNumber = trackMeta['music:album:track'];
+            if (trackNumber) track.trackNumber = trackNumber;
         }
-        const isPremium = document.querySelector('.AdsContainer') === null;
+        if (albumMeta) {
+            Object.assign(track, albumMeta);
+        }
+    } catch (err) {
+        console.warn('clipinc: could not read album info', err);
+    }
 
-        fetch(
-            'https://open.spotify.com/get_access_token?reason=transport&productType=web_player',
-        )
-            .then((data) => {
-                if (!data.ok) {
-                    throw new Error(`get_access_token returned ${data.status}`);
-                }
-                return data.json();
-            })
-            .then((json) => {
-                if (json.accessToken && json.accessToken !== '') {
-                    fetch('https://api.spotify.com/v1/me/player', {
-                        headers: {
-                            Authorization: `Bearer ${json.accessToken}`,
-                        },
-                    })
-                        .then((res) => {
-                            if (!res.ok) {
-                                throw new Error(
-                                    `Spotify API returned ${res.status}`,
-                                );
-                            }
-                            return res.json();
-                        })
-                        .then((t) => {
-                            if (t.currently_playing_type === 'ad') {
-                                const track = getLocalTrackInfo();
-                                track.type = 'ad';
-                                resolve(track);
-                                return;
-                            }
+    console.debug('clipinc: track info', track);
+    return track;
+}
 
-                            const track = t.item;
+// ids of the playing track and its album from the links of the now playing
+// widget, e.g. /album/<albumId>?uri=spotify:track:<trackId>
+function getCurrentIds() {
+    let trackId = null;
+    let albumId = null;
 
-                            resolve({
-                                title: track.name,
-                                artist: track.artists.reduce(
-                                    (acc, a) =>
-                                        acc + (acc ? ', ' : '') + a.name,
-                                    '',
-                                ),
-                                duration: track.duration_ms,
-                                cover: track.album.images
-                                    ? track.album.images[0].url
-                                    : undefined,
-                                album: track.album.name,
-                                discNumber: track.disc_number,
-                                trackNumber: track.track_number,
-                                albumArtist: track.album.artists.reduce(
-                                    (acc, a) =>
-                                        acc + (acc ? ', ' : '') + a.name,
-                                    '',
-                                ),
-                                albumReleaseYear: parseInt(
-                                    track.album.release_date.substring(0, 4),
-                                    10,
-                                ),
-                                isPremium,
-                                kbps: isPremium ? 256 : 128,
-                                directory:
-                                    directoryName !== ''
-                                        ? directoryName
-                                        : undefined,
-                                progress: t.progress_ms,
-                                startTime: new Date(),
-                            });
-                        })
-                        .catch((err) => {
-                            console.warn(
-                                'clipinc: could not retrieve remote track info, using local info',
-                                err,
-                            );
-                            resolve(getLocalTrackInfo());
-                        });
-                } else {
-                    // No access token available, use local track info
-                    console.warn(
-                        'clipinc: no access token, using local track info',
-                    );
-                    resolve(getLocalTrackInfo());
-                }
-            })
-            .catch((ex) => {
-                // API not available (403, network error, etc.) - fall back to local info
-                console.warn(
-                    'clipinc: access token fetch failed, using local track info',
-                    ex,
-                );
-                resolve(getLocalTrackInfo());
-            });
+    const links = document.querySelectorAll(
+        '[data-testid="context-item-info-title"] a, a[data-testid="context-link"]',
+    );
+    for (const link of links) {
+        const url = new URL(link.href, window.location.origin);
+        albumId = albumId || url.pathname.match(/\/album\/(\w+)/)?.[1];
+        trackId =
+            trackId ||
+            (url.searchParams.get('uri') || '').match(
+                /^spotify:track:(\w+)$/,
+            )?.[1] ||
+            url.pathname.match(/\/track\/(\w+)/)?.[1];
+    }
+
+    return { trackId, albumId };
+}
+
+const albumCache = new Map();
+
+function fetchAlbumMeta(albumId) {
+    if (!albumCache.has(albumId)) {
+        const promise = fetchPageMeta(`/album/${albumId}`).then((meta) => {
+            // music:release_date is "YYYY-MM-DD", og:description mentions
+            // the year as well ("<artist> · Album · <year> · <n> songs")
+            const year =
+                (meta['music:release_date'] || '').match(/^\d{4}/)?.[0] ||
+                (meta['og:description'] || '').match(/\b(19|20)\d{2}\b/)?.[0];
+            return {
+                album: meta['og:title'] || undefined,
+                albumArtist: meta['music:musician_description'] || undefined,
+                albumReleaseYear: parseInt(year, 10) || undefined,
+            };
+        });
+        // a failed request is retried with the next track
+        promise.catch(() => albumCache.delete(albumId));
+        albumCache.set(albumId, promise);
+    }
+    return albumCache.get(albumId);
+}
+
+// reads the <meta> tags (og:* and music:*) of a page on open.spotify.com
+async function fetchPageMeta(path) {
+    const res = await fetch(path, { credentials: 'omit' });
+    if (!res.ok) {
+        throw new Error(`${path} returned ${res.status}`);
+    }
+
+    const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+    const meta = {};
+    doc.querySelectorAll('meta[property], meta[name]').forEach((el) => {
+        const key = el.getAttribute('property') || el.getAttribute('name');
+        if (!(key in meta)) meta[key] = el.getAttribute('content');
     });
+    return meta;
+}
 
 function getLocalTrackInfo() {
     let directoryName = '';

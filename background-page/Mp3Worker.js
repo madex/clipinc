@@ -119,10 +119,6 @@ function finish(track) {
                 writer.setFrame('TPE2', track.albumArtist);
             }
 
-            if (track.albumReleaseDate) {
-                writer.setFrame('TDAT', track.albumReleaseDate);
-            }
-
             if (track.albumReleaseYear) {
                 writer.setFrame('TYER', track.albumReleaseYear);
             }

@@ -255,17 +255,23 @@ function isSpotifyPlaying() {
 }
 
 function getCurrentTitle() {
-    const el = document.querySelector(
-        '[data-testid="context-item-info-title"]',
-    );
-    return el?.textContent || null;
+    // the now playing bar v2 dropped context-item-info-title, its title is
+    // the text of the context-item-link inside the widget
+    const el =
+        document.querySelector(
+            '[data-testid="now-playing-widget-v2"] [data-testid="context-item-link"]',
+        ) || document.querySelector('[data-testid="context-item-info-title"]');
+    return el?.textContent?.trim() || null;
 }
 
 function getCurrentArtist() {
-    const el = document.querySelector(
-        '[data-testid="context-item-info-subtitles"]',
-    );
-    return el?.textContent || null;
+    // v2 renders the artists in now-playing-widget-v2-byline
+    const el =
+        document.querySelector(
+            '[data-testid="now-playing-widget-v2-byline"]',
+        ) ||
+        document.querySelector('[data-testid="context-item-info-subtitles"]');
+    return el?.textContent?.trim() || null;
 }
 
 // ---- Track Info Functions ----
@@ -370,7 +376,9 @@ function getCurrentIds() {
     let albumId = null;
 
     const links = document.querySelectorAll(
-        '[data-testid="context-item-info-title"] a, a[data-testid="context-link"]',
+        '[data-testid="now-playing-widget-v2"] a[data-testid="context-item-link"], ' +
+            '[data-testid="context-item-info-title"] a, ' +
+            'a[data-testid="context-link"]',
     );
     for (const link of links) {
         const url = new URL(link.href, window.location.origin);
@@ -441,12 +449,6 @@ function getLocalTrackInfo() {
     }
     const isPremium = document.querySelector('.AdsContainer') === null;
 
-    const titleEl = document.querySelector(
-        '[data-testid="context-item-info-title"]',
-    );
-    const artistEl = document.querySelector(
-        '[data-testid="context-item-info-subtitles"]',
-    );
     const durationEl = document.querySelector(
         '[data-testid="playback-duration"]',
     );
@@ -454,8 +456,8 @@ function getLocalTrackInfo() {
         'img[data-testid="cover-art-image"]',
     );
 
-    const title = titleEl?.textContent || 'Unknown Title';
-    const artist = artistEl?.textContent || 'Unknown Artist';
+    const title = getCurrentTitle() || 'Unknown Title';
+    const artist = getCurrentArtist() || 'Unknown Artist';
     const duration = durationEl?.textContent || '0:00';
     const coverSrc = coverEl?.src || '';
     const coverUrls = getCoverUrls(coverSrc);
@@ -476,12 +478,16 @@ function getLocalTrackInfo() {
     };
 }
 
-// The player bar shows a 64px cover, the now playing view 300px. Spotify's
-// CDN encodes the size in the image id (album covers: ab67616d + 00004851 =
-// 64px, 00001e02 = 300px, 0000b273 = 640px, 000082c1 = original size).
+// The player bar shows a 56/64px cover, the now playing view 300px. Spotify's
+// CDN encodes the size in the image id (album covers: ab67616d + 000011eb =
+// 56px, 00004851 = 64px, 00001e02 = 300px, 0000b273 = 640px, 000082c1 =
+// original size). The prefix changed with the new player bar, so any image id
+// is accepted and rewritten to the bigger variants.
 // Returns the urls from best to worst, the worker uses the first that loads.
 function getCoverUrls(src) {
-    const match = src.match(/^(.*\/image\/ab67616d)(00004851|00001e02)(.*)$/);
+    const match = (src || '').match(
+        /^(.*\/image\/ab67616d)([0-9a-f]{8})(.*)$/,
+    );
     if (!match) {
         return src ? [src] : [];
     }
